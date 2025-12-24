@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+data/raw/*
+data/processed/*
+node_modules/
+dist/
