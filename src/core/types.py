@@ -9,13 +9,13 @@ class Packet(BaseModel):
     Standardized internal packet format.
     Immutable once created.
     """
-    exchange_ts: int  # Canonical exchange timestamp in microseconds
-    local_arrival_ts: int # Local monotonic timestamp in microseconds
+    exchange_ts: int  # Canonical exchange timestamp in microseconds (Epoch)
+    local_arrival_ts: int # Local timestamp in microseconds (Epoch)
     drift_us: int # drift = exchange_ts - local_arrival_ts
     source: str # e.g., "binance_ws", "kite_rest"
     topic: str # e.g., "trade.btcusdt", "orderbook.nifty"
     payload: Dict[str, Any] # The raw payload
-    sequence_id: Optional[int] = None # if provided by exchange
+    sequence_id: Optional[str] = None # if provided by exchange (Trade ID can be str or int)
 
 class JournalEntry(BaseModel):
     """
