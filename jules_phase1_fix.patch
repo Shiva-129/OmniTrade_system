@@ -1,0 +1,109 @@
+diff --git a/src/core/clock.py b/src/core/clock.py
+index 92afb3b..3313d33 100644
+--- a/src/core/clock.py
++++ b/src/core/clock.py
+@@ -6,14 +6,23 @@ MICROSECONDS: Final[int] = 1_000_000
+
+class Clock:
+     """
+     Authoritative local clock source.
+
+     Uses time.monotonic_ns() for monotonic guarantees, scaled to microseconds.
+     Uses time.time_ns() for epoch-based timestamps to align with external exchange clocks.
+     """
+
+     @staticmethod
+     def now_us() -> int:
+         """
+         Returns current monotonic time in microseconds (int64).
+
+         WARNING: Do not use for drift calculation against epoch timestamps.
+         """
+         return time.monotonic_ns() // 1000
+
+     @staticmethod
+     def now_epoch_us() -> int:
+         """
+         Returns current epoch time in microseconds (int64).
+
+         Use this for drift calculation against exchange timestamps.
+         """
+         return time.time_ns() // 1000
+
+     @staticmethod
+     def calculate_drift(exchange_ts: int, local_ts: int) -> int:
+         """
+         Drift = Exchange TS - Local TS.
+
+         Both timestamps MUST be in the same time domain (Epoch).
+         """
+         return exchange_ts - local_ts
+diff --git a/src/core/types.py b/src/core/types.py
+index b684d09..1b5a5b1 100644
+--- a/src/core/types.py
++++ b/src/core/types.py
+@@ -10,13 +10,13 @@ class Packet(BaseModel):
+     """
+     Standardized internal packet format. Immutable once created.
+     """
+
+-    exchange_ts: int
+-    local_arrival_ts: int
++    exchange_ts: int  # Epoch microseconds
++    local_arrival_ts: int  # Epoch microseconds
+
+     drift_us: int
+     source: str
+     topic: str
+     payload: Dict[str, Any]
+
+-    sequence_id: Optional[int] = None
++    sequence_id: Optional[str] = None
+diff --git a/src/markets/binance_observer.py b/src/markets/binance_observer.py
+index a5b2c7e..f31ed7f 100644
+--- a/src/markets/binance_observer.py
++++ b/src/markets/binance_observer.py
+@@ -54,7 +54,7 @@ class BinanceObserver(ExchangeInterface):
+                 trades = await self.exchange.watch_trades(symbol)
+
+-                local_ts = Clock.now_us()
++                local_ts = Clock.now_epoch_us()
+
+                 for trade in trades:
+                     yield self._wrap_packet(trade, local_ts, symbol)
+diff --git a/src/observer.py b/src/observer.py
+index b07a9fc..ac15cd7 100644
+--- a/src/observer.py
++++ b/src/observer.py
+@@ -1,7 +1,7 @@
+ import asyncio
+ import signal
+ import sys
+-from typing import List
++from typing import List, Dict
+
+@@ -22,6 +22,9 @@ class ObserverSystem:
+         self.running = True
+         self.exchanges: List[ExchangeInterface] = []
+         self.packet_queue: asyncio.Queue[Packet] = asyncio.Queue()
++
++        self.sequence_tracker: Dict[str, int] = {}
+
+@@ -49,6 +52,11 @@ class ObserverSystem:
+         self.state.set_system_status("CONNECTED")
+         self._transition_status("CONNECTED", "Startup complete", {})
+
+@@ -95,6 +103,18 @@ class ObserverSystem:
+     async def _ingest_loop(self, exchange: ExchangeInterface):
+         async for packet in exchange.listen():
+             if not self.running:
+                 break
+
++            entry = JournalEntry(
++                event_type="PACKET",
++                timestamp=packet.local_arrival_ts,
++                data=packet.model_dump()
++            )
++            self.journal.append(entry)
++
+             await self.packet_queue.put(packet)

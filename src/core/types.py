@@ -34,3 +34,48 @@ class SystemState(BaseModel):
     status: Literal["CONNECTED", "DEGRADED", "HALT"]
     last_seen_ts: int
     gap_count: int
+
+# --- Phase 2: Gatekeeper Types ---
+
+from enum import Enum
+
+class OrderSide(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+class OrderType(str, Enum):
+    LIMIT = "LIMIT"
+    MARKET = "MARKET"
+
+class TimeInForce(str, Enum):
+    GTC = "GTC"
+    IOC = "IOC"
+    FOK = "FOK"
+
+class OrderIntent(BaseModel):
+    """
+    Intent to place an order. Guaranteed immutable by policy.
+    """
+    client_order_id: str
+    symbol: str
+    side: OrderSide
+    order_type: OrderType
+    quantity: float # Decimal preferred in full impl, float for now if acceptable or switch to Decimal
+    price: Optional[float] = None
+    time_in_force: TimeInForce = TimeInForce.GTC
+    timestamp: int # local creation time
+
+class ExecutionReport(BaseModel):
+    """
+    Truth from the exchange. Logic triggers on this.
+    """
+    client_order_id: str
+    exchange_order_id: str
+    symbol: str
+    side: OrderSide
+    status: Literal["NEW", "PARTIAL_FILL", "FILLED", "CANCELED", "REJECTED"]
+    filled_quantity: float
+    last_filled_price: float
+    remaining_quantity: float
+    timestamp: int # Exchange timestamp
+
