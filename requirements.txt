@@ -6,3 +6,6 @@ numpy
 websockets
 orjson
 python-dotenv
+pandas
+pyarrow
+vectorbt
