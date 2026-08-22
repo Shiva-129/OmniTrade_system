@@ -1,6 +1,11 @@
 .env
 __pycache__/
 *.pyc
+
+# Runtime journals & hash logs (event-sourced state, not source)
+journal.jsonl
+*.hashes.json
+
 data/raw/*
 data/processed/*
 node_modules/

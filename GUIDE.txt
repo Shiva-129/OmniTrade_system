@@ -1,0 +1,75 @@
+# OmniTrade System - Setup & Run Guide
+
+This guide provides step-by-step instructions to get the OmniTrade System running on your Windows machine.
+
+## 1. Prerequisites
+
+Before running the application, you need to ensure the following software is installed and running:
+
+### A. Python
+- Ensure you have **Python 3.8** or newer installed.
+- You can check by running `python --version` in your terminal.
+
+### B. Redis Server (CRITICAL)
+The system uses Redis for state management. You MUST have a Redis server running.
+- **For Windows**: 
+  - **Option 1 (Recommended)**: Install [Memurai](https://www.memurai.com/) (Redis-compatible for Windows) or a native port like [Redis for Windows](https://github.com/tporadowski/redis/releases).
+  - **Option 2 (WSL)**: Run Redis inside Windows Subsystem for Linux (`sudo service redis-server start`).
+  - **Option 3 (Docker)**: If you use Docker, run `docker run -d -p 6379:6379 redis`.
+- **Verify**: The app expects Redis at `localhost:6379`.
+
+## 2. Installation Setup
+
+1.  **Open Terminal**
+    - Open Command Prompt (cmd) or PowerShell.
+    - Navigate to the project folder:
+      ```cmd
+      cd c:\Users\shiva\Downloads\website\OmniTrade_System
+      ```
+
+2.  **Install Dependencies**
+    - Run the following command to install all required python libraries:
+      ```cmd
+      pip install -r requirements.txt
+      ```
+
+## 3. Configuration
+
+1.  **Environment Variables**
+    - Edit the `.env` file in the main folder.
+    - Add your exchange credentials if you plan to execute trades (currently the observer runs in read-only mode for some streams, but `src/core/state.py` expects this file).
+
+## 4. Running the Application
+
+There are two main components you can run.
+
+### A. Running the Market Observer (Main Component)
+This is the active component that connects to Binance/Kite and journals data.
+
+**Method 1: Using the Startup Script (Easiest)**
+- Simply double-click the `run_observer.bat` file in the folder.
+- OR run it from terminals:
+  ```cmd
+  run_observer.bat
+  ```
+
+**Method 2: Manual Start**
+- If you prefer running it manually via Python:
+  ```cmd
+  set PYTHONPATH=%PYTHONPATH%;.
+  python src/observer.py
+  ```
+
+### B. Running the Trading Engine
+*Note: The main engine currently initializes but has limited logic implemented in the current version.*
+```cmd
+python main.py
+```
+
+## 5. Troubleshooting
+
+- **"Connection refused" / Redis Errors**: 
+  - This means Redis is not running. Start your Redis server and try again.
+- **"ModuleNotFoundError"**: 
+  - Make sure you ran `pip install -r requirements.txt`.
+  - Ensure you are running the command from the root `OmniTrade_System` folder.
