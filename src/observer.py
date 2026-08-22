@@ -5,7 +5,7 @@ from typing import List, Dict, Optional
 from .core.clock import Clock
 from .core.state import ObserverState
 from .core.journal import RawJournal
-from .core.logger import list_logger, configure_logging, get_logger
+from .core.logger import configure_logging, get_logger
 from .core.types import JournalEntry, Packet
 from .markets.exchange_interface import ExchangeInterface
 from .markets.binance_observer import BinanceObserver
@@ -46,8 +46,11 @@ class ObserverSystem:
 
         # Signal Handling
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self.shutdown(s)))
+        if sys.platform != "win32":
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self.shutdown(s)))
+        else:
+            logger.info("windows_platform_detected", action="using_keyboard_interrupt_only")
 
         self._transition_status("CONNECTED", "Startup complete", {})
 
