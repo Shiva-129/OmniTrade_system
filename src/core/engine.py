@@ -24,9 +24,12 @@ from .portfolio import Portfolio
 from .state import ObserverState
 from .journal import RawJournal
 from .logger import configure_logging, get_logger
-from .types import ExecutionReport, JournalEntry, MarketEvent, PortfolioUpdate
+from .types import ExecutionReport, JournalEntry, MarketEvent, PortfolioUpdate, RiskDecision
+from ..gatekeeper.engine import Gatekeeper
 from ..gatekeeper.state_controller import StateController
 from ..markets.exchange_interface import ExchangeInterface
+from ..strategies.base import BaseStrategy
+from ..core.risk_manager import RiskManager
 
 configure_logging()
 logger = get_logger("TradingEngine")
@@ -38,6 +41,9 @@ class TradingEngine:
         redis_url: str = "redis://localhost:6379/0",
         journal_path: str = "journal.jsonl",
         portfolio: Portfolio | None = None,
+        strategy: BaseStrategy | None = None,
+        risk_manager: RiskManager | None = None,
+        gatekeeper: Gatekeeper | None = None,
     ):
         self.bus = EventBus()
         self.state = ObserverState(redis_url=redis_url)
@@ -46,6 +52,10 @@ class TradingEngine:
         self.state_controller = StateController(redis_url)
         # Phase 5: optional financial truth. None => observation-only mode.
         self.portfolio = portfolio
+        # Phase 7 pipeline: MarketEvent -> Strategy -> Risk -> Gatekeeper.
+        self.strategy = strategy
+        self.risk_manager = risk_manager
+        self.gatekeeper = gatekeeper
         self.exchanges: List[ExchangeInterface] = []
         self.sequence_tracker: Dict[str, int] = {}
         self.processed_count = 0
@@ -92,7 +102,12 @@ class TradingEngine:
 
     async def start(self):
         init_money_context_once()
-        logger.info("engine_startup", version="phase-4-engine")
+        if self.strategy is not None and self.risk_manager is None:
+            raise ValueError(
+                "Strategy stage requires a RiskManager: "
+                "strategies must never bypass risk evaluation."
+            )
+        logger.info("engine_startup", version="phase-7-engine")
         self.running = True
 
         market_q = self.register_stage(MarketEvent)
@@ -234,7 +249,29 @@ class TradingEngine:
             logger.error("SYSTEM_HALT_DRIFT_VIOLATION", mean_drift_us=stats.mean_us)
             self._transition_status("HALT", "Drift Violation", {"mean_drift_us": stats.mean_us})
 
-        # 5. Structured log
+        # 5. Strategy stage (Phase 7): signal -> risk -> gatekeeper.
+        #    The engine NEVER invents intents; strategies never mutate
+        #    money. Decisions are journaled for audit.
+        if self.strategy is not None:
+            intent = self.strategy.on_market_event(event)
+            if intent is not None:
+                decision = self.risk_manager.evaluate(
+                    intent, now_us=packet.exchange_ts
+                )
+                self.journal.append(JournalEntry(
+                    event_type="PACKET",
+                    timestamp=Clock.now_epoch_us(),
+                    data={"source": "risk_decision",
+                          **decision.model_dump(mode="json")},
+                ))
+                await self.bus.publish(RiskDecision, decision)
+                if decision.approved and self.gatekeeper is not None:
+                    outcome = self.gatekeeper.submit_intent(intent)
+                    logger.info("intent_submitted",
+                                cloid=intent.client_order_id,
+                                outcome=outcome)
+
+        # 6. Structured log
         logger.info(
             "market_event_processed",
             drift_us=packet.drift_us,
