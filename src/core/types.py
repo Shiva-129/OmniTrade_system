@@ -1,4 +1,4 @@
-from typing import Literal, Optional, Dict, Any
+from typing import Literal, Optional, Dict, Any, Tuple
 from pydantic import BaseModel, Field
 from .money import Decimal
 
@@ -108,16 +108,42 @@ class MarketEvent(BaseModel):
 
     packet: Packet
 
+class RiskCheck(BaseModel):
+    """
+    Audit record for ONE risk rule evaluation (Phase 6).
+    Deterministic ordering; detail carries current-vs-limit values.
+    """
+    model_config = {"frozen": True}
+
+    rule: str
+    passed: bool
+    detail: str = ""
+
+
 class RiskDecision(BaseModel):
     """
-    Outcome of a risk evaluation of one OrderIntent.
-    Emitted by the Risk engine (Phase 6); consumed by execution path.
+    Explicit, auditable outcome of a risk evaluation of one OrderIntent.
+
+    Phase 6 extension (backward compatible -- new fields defaulted):
+    - rule:    first FAILING rule in fixed pipeline order ("PASS" when clean)
+    - checks:  full ordered audit trail of every rule evaluated
+    - details: relevant limit/current values as canonical strings
+
+    `approved` retained for Phase 4 compatibility; `allowed` is canonical.
     """
     model_config = {"frozen": True}
 
     client_order_id: str
+    symbol: str = ""
     approved: bool
+    rule: str = "PASS"
     reason: str = ""
+    checks: Tuple[RiskCheck, ...] = ()
+    details: Dict[str, str] = {}
+
+    @property
+    def allowed(self) -> bool:
+        return self.approved
 
 class PortfolioUpdate(BaseModel):
     """
