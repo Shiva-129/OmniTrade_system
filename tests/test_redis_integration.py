@@ -1,5 +1,5 @@
 """
-GATE 0: Integration tests against the REAL Redis instance.
+GATE 0/4: Integration tests against the REAL Redis instance.
 
 Verifies the application's existing Redis-backed components
 (ObserverState, StateController) work against a live server at
@@ -8,33 +8,15 @@ localhost:6379 -- the project's documented configuration (GUIDE.txt).
 Rules honored by this module:
 - No fake/mock Redis fallback.
 - Tests FAIL loudly if Redis is unreachable; they are NEVER skipped.
-- Uses DB 15 exclusively and flushes only that DB, leaving production DB 0 untouched.
+- Uses DB 15 exclusively (see tests/conftest.py fixture).
 """
 import pytest
-import redis
 
 from src.core.state import ObserverState
 from src.gatekeeper.state_controller import StateController
 from src.core.types import ExecutionReport, OrderSide
 
-TEST_REDIS_URL = "redis://localhost:6379/15"
-
-
-@pytest.fixture()
-def live_redis():
-    client = redis.from_url(TEST_REDIS_URL, decode_responses=True)
-    try:
-        client.ping()
-    except Exception as e:
-        pytest.fail(
-            f"GATE 0 requires a running Redis at localhost:6379 "
-            f"(start with: wsl -d kali-linux -e bash -c 'redis-server --daemonize yes'). "
-            f"Underlying error: {e}"
-        )
-    client.flushdb()  # isolated scratch DB for deterministic assertions
-    yield client
-    client.flushdb()
-    client.close()
+from conftest import TEST_REDIS_URL
 
 
 class TestObserverStateLiveRedis:
@@ -59,13 +41,13 @@ class TestObserverStateLiveRedis:
 
 
 class TestStateControllerLiveRedis:
-    def _report(self, cloid="t-1", side=OrderSide.BUY, qty=0.5):
+    def _report(self, cloid="t-1", side=OrderSide.BUY, qty=0.5, status="FILLED"):
         return ExecutionReport(
             client_order_id=cloid,
             exchange_order_id=f"x-{cloid}",
             symbol="BTCUSDT",
             side=side,
-            status="FILLED",
+            status=status,
             filled_quantity=qty,
             last_filled_price=50000.0,
             remaining_quantity=0.0,
@@ -87,9 +69,9 @@ class TestStateControllerLiveRedis:
     def test_partial_fills_accumulate(self, live_redis):
         controller = StateController(TEST_REDIS_URL)
         controller.process_execution_report(self._report(cloid="p1", qty=0.5))
-        partial = self._report(cloid="p2", qty=0.5)
-        partial.status = "PARTIAL_FILL"
-        controller.process_execution_report(partial)
+        controller.process_execution_report(
+            self._report(cloid="p2", qty=0.5, status="PARTIAL_FILL")
+        )
         assert controller.get_position("BTCUSDT") == 1.0
 
     def test_order_state_persisted_by_cloid(self, live_redis):

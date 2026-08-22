@@ -1,5 +1,6 @@
 from typing import Literal, Optional, Dict, Any
 from pydantic import BaseModel, Field
+from .money import Decimal
 
 # Constants
 MICROSECONDS_PER_SECOND = 1_000_000
@@ -9,6 +10,8 @@ class Packet(BaseModel):
     Standardized internal packet format.
     Immutable once created.
     """
+    model_config = {"frozen": True}
+
     exchange_ts: int  # Canonical exchange timestamp in microseconds
     local_arrival_ts: int # Local monotonic timestamp in microseconds
     drift_us: int # drift = exchange_ts - local_arrival_ts
@@ -55,27 +58,67 @@ class TimeInForce(str, Enum):
 class OrderIntent(BaseModel):
     """
     Intent to place an order. Guaranteed immutable by policy.
+    Quantity/price are Decimal (canonical money policy). Pydantic
+    serializes them as fixed-point strings on the wire.
     """
+    model_config = {"frozen": True}
+
     client_order_id: str
     symbol: str
     side: OrderSide
     order_type: OrderType
-    quantity: float # Decimal preferred in full impl, float for now if acceptable or switch to Decimal
-    price: Optional[float] = None
+    quantity: Decimal
+    price: Optional[Decimal] = None
     time_in_force: TimeInForce = TimeInForce.GTC
     timestamp: int # local creation time
 
 class ExecutionReport(BaseModel):
     """
     Truth from the exchange. Logic triggers on this.
+    All monetary fields are Decimal (canonical money policy).
     """
+    model_config = {"frozen": True}
+
     client_order_id: str
     exchange_order_id: str
     symbol: str
     side: OrderSide
     status: Literal["NEW", "PARTIAL_FILL", "FILLED", "CANCELED", "REJECTED"]
-    filled_quantity: float
-    last_filled_price: float
-    remaining_quantity: float
+    filled_quantity: Decimal
+    last_filled_price: Decimal
+    remaining_quantity: Decimal
     timestamp: int # Exchange timestamp
 
+# --- Phase 4: Event Contracts ---
+# Components exchange information ONLY through these typed events
+# (EventBus boundary rule). No cross-component method calls.
+
+class MarketEvent(BaseModel):
+    """
+    Normalized market observation emitted onto the EventBus.
+    Wraps the raw Packet with an explicit event envelope.
+    """
+    model_config = {"frozen": True}
+
+    packet: Packet
+
+class RiskDecision(BaseModel):
+    """
+    Outcome of a risk evaluation of one OrderIntent.
+    Emitted by the Risk engine (Phase 6); consumed by execution path.
+    """
+    model_config = {"frozen": True}
+
+    client_order_id: str
+    approved: bool
+    reason: str = ""
+
+class PortfolioUpdate(BaseModel):
+    """
+    Reserved event contract for Phase 5. Defined now so the bus
+    contract surface is complete; nothing publishes it yet.
+    """
+    model_config = {"frozen": True}
+
+    symbol: str
+    quantity_delta: Decimal

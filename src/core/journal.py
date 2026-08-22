@@ -10,6 +10,7 @@ class RawJournal:
     """
     def __init__(self, filepath: str = "journal.jsonl"):
         self.filepath = filepath
+        self.is_closed = False
         # Open in append mode, text
         self._file = open(self.filepath, "a", buffering=1) # Line buffered
 
@@ -17,6 +18,8 @@ class RawJournal:
         """
         Writes a single entry to the journal.
         """
+        if self.is_closed:
+            raise RuntimeError("Journal is closed")
         payload = entry.model_dump()
         # Ensure we write a single line
         line = json.dumps(payload) + "\n"
@@ -25,6 +28,9 @@ class RawJournal:
         # self._file.flush()
 
     def close(self):
+        if self.is_closed:
+            return
+        self.is_closed = True
         self._file.close()
 
     @staticmethod

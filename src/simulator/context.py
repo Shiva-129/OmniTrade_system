@@ -1,33 +1,36 @@
 """
 OmniTrade Simulator: Global Deterministic Context
 
-This module defines the SINGLE global execution context for the simulator.
-All decimal math, RNG, and configuration MUST flow through here.
+Phase 4: the Decimal policy is now OWNED by src/core/money.py (canonical
+prec=28 / ROUND_HALF_EVEN) so the live path and the replay path are
+guaranteed to share one arithmetic universe. This module re-exports it
+under the simulator's historical names for compatibility.
 """
-import decimal
 import hashlib
 import random
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional
 
-# --- GLOBAL DECIMAL CONTEXT (IMMUTABLE AFTER INIT) ---
-# This MUST match production execution exactly.
-DECIMAL_CONTEXT = decimal.Context(
-    prec=28,                          # Precision
-    rounding=decimal.ROUND_HALF_EVEN, # Banker's rounding
-    Emin=-999999,
-    Emax=999999,
-    capitals=1,
-    clamp=0,
-    flags=[],
-    traps=[decimal.InvalidOperation, decimal.DivisionByZero, decimal.Overflow]
+from ..core.money import (
+    CANONICAL_CONTEXT as DECIMAL_CONTEXT,
+    init_money_context,
 )
+
+# Compatibility alias -- do not define a second context here.
+__all__ = [
+    "DECIMAL_CONTEXT",
+    "init_decimal_context",
+    "SimulatorConfig",
+    "DeterministicRNG",
+]
+
 
 def init_decimal_context():
     """
     Sets the global decimal context. Call ONCE at simulator startup.
+    Delegates to the canonical project-wide money policy.
     """
-    decimal.setcontext(DECIMAL_CONTEXT)
+    init_money_context()
 
 @dataclass(frozen=True)
 class SimulatorConfig:

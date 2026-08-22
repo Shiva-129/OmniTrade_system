@@ -14,7 +14,7 @@ class Gatekeeper:
     """
     def __init__(self, redis_url: str = "redis://localhost:6379/0"):
         self.state_controller = StateController(redis_url)
-        self.command_registry = CommandRegistry()
+        self.command_registry = CommandRegistry(redis_url)
         self.guard = ExecutionGuard(redis_url)
         self.reconciliation = ReconciliationEngine(self.state_controller, self.guard)
 

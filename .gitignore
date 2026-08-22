@@ -11,3 +11,6 @@ data/processed/*
 node_modules/
 dist/
 .coverage
+
+# Redis persistence snapshots
+dump.rdb

@@ -19,10 +19,17 @@ class ObserverState:
     def update_drift(self, drift_us: int) -> DriftStats:
         """
         Updates rolling drift statistics.
+        Also refreshes the liveness heartbeat (observer:last_update) on
+        EVERY packet -- the ExecutionGuard blocks if this goes stale.
         """
         self.drift_samples.append(drift_us)
         if len(self.drift_samples) > self.max_drift_samples:
             self.drift_samples.pop(0)
+
+        # Phase 4 fix: heartbeat freshness is per-packet, not per-transition.
+        # Without this, the Guard's 2s staleness check hard-blocks shortly
+        # after startup even while streaming healthily.
+        self.redis.set("observer:last_update", Clock.now_us())
 
         mean_val = statistics.mean(self.drift_samples) if self.drift_samples else 0.0
         
