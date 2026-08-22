@@ -76,6 +76,11 @@ class ExecutionReport(BaseModel):
     """
     Truth from the exchange. Logic triggers on this.
     All monetary fields are Decimal (canonical money policy).
+
+    Phase 5: `fee` is the absolute commission charged by the venue for
+    THIS fill, denominated in quote currency (e.g. USDT). It is part of
+    the event-sourced record so fee accounting survives replay.
+    Default 0 keeps pre-fee producers backward compatible.
     """
     model_config = {"frozen": True}
 
@@ -88,6 +93,7 @@ class ExecutionReport(BaseModel):
     last_filled_price: Decimal
     remaining_quantity: Decimal
     timestamp: int # Exchange timestamp
+    fee: Decimal = Decimal("0")
 
 # --- Phase 4: Event Contracts ---
 # Components exchange information ONLY through these typed events

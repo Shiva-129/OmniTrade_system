@@ -46,10 +46,16 @@ class StateHasher:
         positions: Dict[str, Decimal],
         orders: Dict[str, Any],
         system_status: str,
-        gap_count: int
+        gap_count: int,
+        portfolio_snapshot: Any = None,
     ) -> str:
         """
         Hash the complete system state.
+
+        Phase 5: when a portfolio participates, its snapshot is folded in
+        under an explicit key. When absent (pre-Phase-5 journals), the
+        payload is byte-identical to legacy output -> old reference hashes
+        still verify.
         """
         state = {
             "positions": positions,
@@ -57,4 +63,6 @@ class StateHasher:
             "system_status": system_status,
             "gap_count": gap_count
         }
+        if portfolio_snapshot is not None:
+            state["portfolio"] = portfolio_snapshot
         return StateHasher.hash_state(state)

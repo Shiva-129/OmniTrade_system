@@ -11,18 +11,28 @@ from .context import SimulatorConfig, DeterministicRNG, init_decimal_context
 from .journal_reader import JournalReader, OrderedEvent
 from .state_store import SimulatedStateStore
 from .verdict import ReplayVerdict, VerdictStatus, DivergencePoint
-from ..core.types import JournalEntry
+from ..core.money import to_decimal
+from ..core.portfolio import Portfolio
+from ..core.types import ExecutionReport, JournalEntry
 
 class ReplayEngine:
     """
     Deterministic Replay Engine.
     
     Invariant: One event in → one state change out → persist hash → next event.
+
+    Phase 5: when config.initial_cash is set, the SAME Portfolio class used
+    live participates in replay -- rebuilt purely from the journal event
+    stream. Live processing and journal replay therefore converge on
+    byte-identical financial state (tested explicitly).
     """
     def __init__(self, config: SimulatorConfig):
         self.config = config
         self.rng = DeterministicRNG(config.rng_seed)
-        self.state = SimulatedStateStore()
+        self.portfolio: Optional[Portfolio] = None
+        if config.initial_cash is not None:
+            self.portfolio = Portfolio(starting_cash=to_decimal(config.initial_cash))
+        self.state = SimulatedStateStore(portfolio=self.portfolio)
         self.journal = JournalReader(config.journal_path)
         
         # Hash log: event_index -> state_hash
@@ -151,7 +161,26 @@ class ReplayEngine:
         # Extract execution report if present (Phase 2 logic)
         if "status" in data and data.get("source") == "execution_report":
             self._handle_execution_report(data)
-        
+
+        # Phase 5: mirror the live engine's mark-to-market behavior --
+        # same extraction rule, same key namespace (topic == symbol),
+        # SAME update_equity call so peaks/drawdown advance identically.
+        if self.portfolio is not None and data.get("source") != "execution_report":
+            payload = data.get("payload") or {}
+            raw_price = payload.get("price")
+            if raw_price is not None:
+                try:
+                    self.portfolio.mark_price(
+                        data.get("topic", ""),
+                        to_decimal(str(raw_price)),
+                        ts_us=int(data.get("exchange_ts") or 0),
+                    )
+                    self.portfolio.update_equity(
+                        now_us=int(data.get("exchange_ts") or 0)
+                    )
+                except Exception:
+                    pass  # deterministic skip -- never invent prices
+
         # Update drift tracking (simulation mode)
         drift = data.get("drift_us", 0)
         # In simulation, we just track; no actual alerts
@@ -159,21 +188,42 @@ class ReplayEngine:
     def _handle_execution_report(self, data: Dict[str, Any]):
         """
         Handle execution report - update state.
-        Mirrors StateController.process_execution_report
+        Mirrors engine.apply_execution_report minus journaling/Redis:
+        StateController-parity position update + Portfolio application
+        (the same accounting implementation as live).
         """
-        status = data.get("status")
-        symbol = data.get("symbol", "")
-        client_order_id = data.get("client_order_id", "")
-        filled_qty = Decimal(str(data.get("filled_quantity", 0)))
-        side = data.get("side", "BUY")
+        # The engine journals reports via model_dump(mode="json"), so the
+        # payload validates straight back into the contract. Legacy float
+        # quantities coerce exactly (repr-based str conversion in pydantic).
+        report_fields = {k: v for k, v in data.items() if k != "source"}
+        try:
+            report = ExecutionReport.model_validate(report_fields)
+        except Exception:
+            # Pre-contract journals: fall back to manual parse (legacy path).
+            report = ExecutionReport(
+                client_order_id=str(data.get("client_order_id", "")),
+                exchange_order_id=str(data.get("exchange_order_id", "")),
+                symbol=data.get("symbol", ""),
+                side=data.get("side", "BUY"),
+                status=data.get("status", "FILLED"),
+                filled_quantity=Decimal(str(data.get("filled_quantity", 0))),
+                last_filled_price=Decimal(str(data.get("last_filled_price", 0))),
+                remaining_quantity=Decimal(str(data.get("remaining_quantity", 0))),
+                timestamp=int(data.get("timestamp", 0)),
+            )
 
-        # Store order state
-        self.state.set_order(client_order_id, data)
+        # Store order state (StateController parity)
+        self.state.set_order(report.client_order_id, data)
 
-        # Update position on fills
-        if status in ["PARTIAL_FILL", "FILLED"]:
-            delta = filled_qty if side == "BUY" else -filled_qty
-            self.state.update_position(symbol, delta)
+        # Update legacy mirror positions on fills
+        if report.status in ["PARTIAL_FILL", "FILLED"]:
+            delta = report.filled_quantity if report.side == "BUY" else -report.filled_quantity
+            self.state.update_position(report.symbol, delta)
+
+        # Single financial truth: same Portfolio class as live. No-ops on
+        # non-fill statuses internally.
+        if self.portfolio is not None:
+            self.portfolio.apply_report(report)
 
     def _handle_status_change(self, data: Dict[str, Any]):
         """Handle system status change."""

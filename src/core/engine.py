@@ -19,10 +19,13 @@ from typing import List, Dict
 
 from .clock import Clock
 from .events import EventBus, EventType, drain
+from .money import to_decimal
+from .portfolio import Portfolio
 from .state import ObserverState
 from .journal import RawJournal
 from .logger import configure_logging, get_logger
-from .types import JournalEntry, MarketEvent
+from .types import ExecutionReport, JournalEntry, MarketEvent, PortfolioUpdate
+from ..gatekeeper.state_controller import StateController
 from ..markets.exchange_interface import ExchangeInterface
 
 configure_logging()
@@ -34,10 +37,15 @@ class TradingEngine:
         self,
         redis_url: str = "redis://localhost:6379/0",
         journal_path: str = "journal.jsonl",
+        portfolio: Portfolio | None = None,
     ):
         self.bus = EventBus()
         self.state = ObserverState(redis_url=redis_url)
         self.journal = RawJournal(filepath=journal_path)
+        # Gatekeeper mirror of positions (Phase 2 semantics, unchanged).
+        self.state_controller = StateController(redis_url)
+        # Phase 5: optional financial truth. None => observation-only mode.
+        self.portfolio = portfolio
         self.exchanges: List[ExchangeInterface] = []
         self.sequence_tracker: Dict[str, int] = {}
         self.processed_count = 0
@@ -49,6 +57,36 @@ class TradingEngine:
     def register_stage(self, event_type: EventType) -> asyncio.Queue:
         """Later phases call this to receive typed events off the bus."""
         return self.bus.subscribe(event_type)
+
+    # ------------------------- execution fan-out ----------------------------
+
+    async def apply_execution_report(self, report: ExecutionReport) -> None:
+        """
+        THE canonical entry point for fills (Phase 5).
+
+        Order is load-bearing:
+          1. WRITE-AHEAD journal (audit: record before applying anywhere)
+          2. Gatekeeper StateController (Phase 2 semantics, unchanged)
+          3. Portfolio (single financial truth)
+          4. PortfolioUpdate published for downstream stages
+
+        Rejections/cancellations flow through too -- they journal and
+        update gatekeeper order state, but the Portfolio no-ops on them.
+        """
+        self.journal.append(JournalEntry(
+            event_type="PACKET",
+            timestamp=Clock.now_epoch_us(),
+            data={"source": "execution_report", **report.model_dump(mode="json")},
+        ))
+
+        self.state_controller.process_execution_report(report)
+
+        if self.portfolio is not None:
+            delta = self.portfolio.apply_report(report)
+            if delta is not None:
+                await self.bus.publish(PortfolioUpdate, PortfolioUpdate(
+                    symbol=report.symbol, quantity_delta=delta,
+                ))
 
     # ------------------------------ lifecycle ------------------------------
 
@@ -169,15 +207,34 @@ class TradingEngine:
             except ValueError:
                 pass  # non-integer sequence id; skip check
 
-        # 2. Drift stats + per-packet heartbeat (Phase 4 fix lives here now)
+        # 2. Mark-to-market (Phase 5): prices ONLY -- never positions/cash.
+        #    Venue price arrives as a wire float; the str() hop is the
+        #    single sanctioned ingestion boundary into Decimal.
+        #    NAMESPACE RULE: packet.topic MUST equal the trading symbol used
+        #    on intents/reports -- marks are keyed by it.
+        if self.portfolio is not None:
+            raw_price = packet.payload.get("price") if packet.payload else None
+            if raw_price is not None:
+                try:
+                    self.portfolio.mark_price(
+                        packet.topic,
+                        to_decimal(str(raw_price)),
+                        ts_us=packet.exchange_ts,
+                    )
+                    self.portfolio.update_equity(now_us=packet.exchange_ts)
+                except Exception as e:
+                    logger.warning("mark_price_skipped", error=str(e),
+                                   topic=packet.topic)  # never invent prices
+
+        # 3. Drift stats + per-packet heartbeat (Phase 4 fix lives here now)
         stats = self.state.update_drift(packet.drift_us)
 
-        # 3. Constraint enforcement
+        # 4. Constraint enforcement
         if abs(stats.mean_us) > 500_000:
             logger.error("SYSTEM_HALT_DRIFT_VIOLATION", mean_drift_us=stats.mean_us)
             self._transition_status("HALT", "Drift Violation", {"mean_drift_us": stats.mean_us})
 
-        # 4. Structured log
+        # 5. Structured log
         logger.info(
             "market_event_processed",
             drift_us=packet.drift_us,

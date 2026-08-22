@@ -36,11 +36,17 @@ def init_decimal_context():
 class SimulatorConfig:
     """
     Immutable configuration for a simulation run.
+
+    Phase 5: initial_cash (fixed-point string) optionally activates
+    portfolio participation during replay. None preserves pre-Phase-5
+    behavior AND legacy config hashes (deliberately excluded from
+    _compute_hash).
     """
     config_hash: str            # Hash of the config snapshot
     rng_seed: int               # Fixed RNG seed
     journal_path: str           # Path to raw event journal
     dependency_versions: Dict[str, str] = field(default_factory=dict)
+    initial_cash: Optional[str] = None
 
     def verify_hash(self) -> bool:
         """
