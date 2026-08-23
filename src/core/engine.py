@@ -44,6 +44,7 @@ class TradingEngine:
         strategy: BaseStrategy | None = None,
         risk_manager: RiskManager | None = None,
         gatekeeper: Gatekeeper | None = None,
+        broker=None,
     ):
         self.bus = EventBus()
         self.state = ObserverState(redis_url=redis_url)
@@ -56,6 +57,10 @@ class TradingEngine:
         self.strategy = strategy
         self.risk_manager = risk_manager
         self.gatekeeper = gatekeeper
+        # Phase 10: optional execution venue (PaperBroker today).
+        self.broker = broker
+        # Duplicate-execution guard: every applied report's exchange id.
+        self._seen_exec_ids: set[str] = set()
         self.exchanges: List[ExchangeInterface] = []
         self.sequence_tracker: Dict[str, int] = {}
         self.processed_count = 0
@@ -80,12 +85,24 @@ class TradingEngine:
           3. Portfolio (single financial truth)
           4. PortfolioUpdate published for downstream stages
 
-        Rejections/cancellations flow through too -- they journal and
-        update gatekeeper order state, but the Portfolio no-ops on them.
+        Phase 10: duplicate ExecutionReports (same exchange_order_id) are
+        dropped before any mutation -- a replayed/duplicated fill can
+        never double-count.
         """
+        exec_key = report.exchange_order_id
+        if exec_key in self._seen_exec_ids:
+            logger.warning("duplicate_execution_report_dropped",
+                           exchange_order_id=exec_key,
+                           client_order_id=report.client_order_id)
+            return
+        self._seen_exec_ids.add(exec_key)
+
+        # Preserve causal order for replay: use the report's own
+        # timestamp (market time, not wall clock) so it sorts interleaved
+        # with the market packet that triggered it.
         self.journal.append(JournalEntry(
             event_type="PACKET",
-            timestamp=Clock.now_epoch_us(),
+            timestamp=int(report.timestamp),
             data={"source": "execution_report", **report.model_dump(mode="json")},
         ))
 
@@ -97,6 +114,11 @@ class TradingEngine:
                 await self.bus.publish(PortfolioUpdate, PortfolioUpdate(
                     symbol=report.symbol, quantity_delta=delta,
                 ))
+
+    def seed_execution_ids(self, ids) -> None:
+        """Restart recovery: pre-load applied report ids from a previous
+        session so replayed reports cannot double-count."""
+        self._seen_exec_ids.update(ids)
 
     # ------------------------------ lifecycle ------------------------------
 
@@ -227,19 +249,29 @@ class TradingEngine:
         #    single sanctioned ingestion boundary into Decimal.
         #    NAMESPACE RULE: packet.topic MUST equal the trading symbol used
         #    on intents/reports -- marks are keyed by it.
-        if self.portfolio is not None:
-            raw_price = packet.payload.get("price") if packet.payload else None
-            if raw_price is not None:
-                try:
+        mark: Optional = None
+        raw_price = packet.payload.get("price") if packet.payload else None
+        if raw_price is not None:
+            try:
+                mark = to_decimal(str(raw_price))
+            except Exception:
+                mark = None
+            if mark is not None:
+                if self.portfolio is not None:
                     self.portfolio.mark_price(
-                        packet.topic,
-                        to_decimal(str(raw_price)),
-                        ts_us=packet.exchange_ts,
-                    )
+                        packet.topic, mark, ts_us=packet.exchange_ts)
                     self.portfolio.update_equity(now_us=packet.exchange_ts)
-                except Exception as e:
-                    logger.warning("mark_price_skipped", error=str(e),
-                                   topic=packet.topic)  # never invent prices
+
+                # Phase 10: broker works RESTING orders at this price
+                # BEFORE the strategy sees it (deterministic ordering).
+                if self.broker is not None:
+                    self.broker.on_market_price(
+                        packet.topic, mark, ts_us=packet.exchange_ts)
+                    for rep in self.broker.drain_reports():
+                        await self.apply_execution_report(rep)
+            else:
+                logger.warning("mark_price_skipped", error="unparseable price",
+                               topic=packet.topic)  # never invent prices
 
         # 3. Drift stats + per-packet heartbeat (Phase 4 fix lives here now)
         stats = self.state.update_drift(packet.drift_us)
@@ -260,7 +292,7 @@ class TradingEngine:
                 )
                 self.journal.append(JournalEntry(
                     event_type="PACKET",
-                    timestamp=Clock.now_epoch_us(),
+                    timestamp=int(packet.exchange_ts),
                     data={"source": "risk_decision",
                           **decision.model_dump(mode="json")},
                 ))
@@ -270,6 +302,15 @@ class TradingEngine:
                     logger.info("intent_submitted",
                                 cloid=intent.client_order_id,
                                 outcome=outcome)
+                    # Phase 10: Gatekeeper-approved intents may now reach
+                    # the venue. Reports drain through the same funnel.
+                    if outcome == "ACCEPTED" and self.broker is not None:
+                        broker_outcome = self.broker.submit_order(intent)
+                        logger.info("broker_submission",
+                                    cloid=intent.client_order_id,
+                                    outcome=broker_outcome)
+                        for rep in self.broker.drain_reports():
+                            await self.apply_execution_report(rep)
 
         # 6. Structured log
         logger.info(
