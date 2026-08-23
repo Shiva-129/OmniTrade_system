@@ -84,8 +84,8 @@ class TradingEngine:
         for _n, _c in AlertManager.standard_conditions().items():
             try:
                 self.alerts.register(_n, _c)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("observability_failed", error=str(e), context="alerts_register")
         # D5: User-data stream (optional, testnet only)
         self.user_stream = user_stream
         # Wire gatekeeper's guard to same safety (single state machine).
@@ -162,15 +162,15 @@ class TradingEngine:
                 self.metrics.inc("execution_trades_total")
             elif report.status in ("PARTIAL_FILL", "PARTIALLY_FILLED"):
                 self.metrics.inc("partial_fills")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("observability_failed", error=str(e), context="metrics_fills")
         # Update health with portfolio state
         try:
             if self.portfolio is not None:
                 self.health.set("equity", float(self.portfolio.last_equity))
                 self.health.set("fees_paid", float(self.portfolio.fees_paid))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("observability_failed", error=str(e), context="health_equity")
 
     def seed_execution_ids(self, ids) -> None:
         """Restart recovery: pre-load applied report ids from a previous
@@ -243,13 +243,13 @@ class TradingEngine:
                         self.safety.halt(f"startup reconciliation mismatch: {result.get('mismatches')}")
                         try:
                             self.metrics.inc("reconciliation_mismatch")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("observability_failed", error=str(e), context="reconciliation_mismatch")
                         return False
                     try:
                         self.metrics.inc("reconciliation_success")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("observability_failed", error=str(e), context="reconciliation_success")
                 except Exception as e:
                     logger.error("startup_reconcile_failed", error=str(e))
                     self.safety.halt(f"startup reconcile failed: {e}")
@@ -451,8 +451,8 @@ class TradingEngine:
         try:
             self.health.set("last_market_ts", packet.exchange_ts)
             self.health.set("last_source", packet.source)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("observability_failed", error=str(e), context="health_heartbeat")
 
         # 1. Sequence & gap detection
         key = f"{packet.source}:{packet.topic}"
@@ -476,8 +476,8 @@ class TradingEngine:
                             self.metrics.inc("gaps")
                             self.health.set("gap_count", self.state.get_gap_count())
                             self.health.set("last_gap_source", key)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("observability_failed", error=str(e), context="gap_metrics")
                         if self.state.get_system_status() == "CONNECTED":
                             self._transition_status("DEGRADED", msg, {"gap": gap_size})
                     elif seq_id < last_seq:
@@ -521,16 +521,16 @@ class TradingEngine:
             self.health.set("clock_drift_us", stats.mean_us)
             self.health.set("heartbeat_age_s", 0)
             self.metrics.gauge("clock_drift_us", float(stats.mean_us))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("observability_failed", error=str(e), context="drift_health_gauge")
 
         # 4. Constraint enforcement
         if abs(stats.mean_us) > 500_000:
             logger.error("SYSTEM_HALT_DRIFT_VIOLATION", mean_drift_us=stats.mean_us)
             try:
                 self.metrics.inc("halt_total", tags={"reason": "drift"})
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("observability_failed", error=str(e), context="halt_total_drift")
             self._transition_status("HALT", "Drift Violation", {"mean_drift_us": stats.mean_us})
 
         # 5. Strategy stage (Phase 7 + 13): signal -> SAFETY -> risk -> gatekeeper.
@@ -541,8 +541,8 @@ class TradingEngine:
             if intent is not None:
                 try:
                     self.metrics.inc("orders_submitted")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("observability_failed", error=str(e), context="orders_submitted")
                 # D1: authoritative safety check (before risk)
                 is_reducing = self._is_intent_reducing(intent)
                 blocked_reason = None
@@ -554,8 +554,8 @@ class TradingEngine:
                 if blocked_reason is not None:
                     try:
                         self.metrics.inc("safety_blocks", tags={"state": self.safety.state.value})
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("observability_failed", error=str(e), context="safety_blocks")
                     # Synthesize a safety-blocked decision (audited, no risk call)
                     decision = RiskDecision(
                         client_order_id=intent.client_order_id,
@@ -583,8 +583,8 @@ class TradingEngine:
                             self.metrics.inc("risk_approvals")
                         else:
                             self.metrics.inc("risk_rejections", tags={"rule": decision.rule})
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("observability_failed", error=str(e), context="risk_metrics")
                     self.journal.append(JournalEntry(
                         event_type="PACKET",
                         timestamp=int(packet.exchange_ts),
@@ -592,6 +592,15 @@ class TradingEngine:
                               **decision.model_dump(mode="json")},
                     ))
                     await self.bus.publish(RiskDecision, decision)
+                    # RESEARCH-ONLY contract: Gatekeeper=None is allowed only for unit/research;
+                    # for PAPER/TESTNET it is fail-closed (no broker). Log explicitly.
+                    if decision.approved and self.gatekeeper is None:
+                        logger.warning("gatekeeper_missing_fail_closed",
+                                       cloid=intent.client_order_id, mode=self.execution_mode.value)
+                        try:
+                            self.metrics.inc("gatekeeper_missing_blocked")
+                        except Exception:
+                            pass
                     if decision.approved and self.gatekeeper is not None:
                         outcome = self.gatekeeper.submit_intent(intent)
                         logger.info("intent_submitted",
@@ -603,15 +612,15 @@ class TradingEngine:
                             elif outcome == "ACCEPTED":
                                 self.metrics.inc("gatekeeper_accepted")
                             self.health.set("last_gatekeeper_outcome", outcome)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("observability_failed", error=str(e), context="gatekeeper_metrics")
                         # Phase 10: Gatekeeper-approved intents may now reach
                         # the venue. Reports drain through the same funnel.
                         if outcome == "ACCEPTED" and self.broker is not None:
                             try:
                                 self.metrics.inc("broker_submissions")
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug("observability_failed", error=str(e), context="broker_submissions")
                             broker_outcome = self.broker.submit_order(intent)
                             logger.info("broker_submission",
                                         cloid=intent.client_order_id,
@@ -644,15 +653,15 @@ class TradingEngine:
             try:
                 self.metrics.inc("halt_total")
                 self.health.set("last_halt_reason", reason)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("observability_failed", error=str(e), context="halt_total")
         elif new_status == "DEGRADED":
             self.safety.degrade(reason)
             try:
                 self.metrics.inc("degraded_total")
                 self.health.set("last_degraded_reason", reason)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("observability_failed", error=str(e), context="degraded_total")
         elif new_status == "CONNECTED":
             # Fail-closed: do not auto-recover HALT/DEGRADED via observer.
             # HEALTHY stays HEALTHY; DEGRADED/HALT require explicit recovery.
@@ -666,8 +675,8 @@ class TradingEngine:
         # D4: evaluate alerts after every status change
         try:
             self.alerts.evaluate(self.health_snapshot())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("observability_failed", error=str(e), context="alerts_evaluate")
 
 
 def init_money_context_once():
