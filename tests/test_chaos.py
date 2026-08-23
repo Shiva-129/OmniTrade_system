@@ -9,6 +9,7 @@ Injects failures into every major component and verifies:
 5. recoverability or HALT
 """
 import asyncio
+import pathlib
 
 import pytest
 
@@ -95,19 +96,49 @@ class TestChaosBroker:
         b = PaperBroker(CostModel())
         assert b.cancel_order("ghost") == "UNKNOWN"
 
-    def test_broker_duplicate_report_never_double_counts(self):
+    def test_broker_duplicate_report_never_double_counts(self, tmp_path):
+        # Verify duplicate ExecutionReport via REAL public path TradingEngine.apply_execution_report
+        # — not by manually setting _seen_report_ids then checking drain empty
+        import asyncio
+        from src.core.engine import TradingEngine
+        from src.core.portfolio import Portfolio
+        asyncio.run(self._test_duplicate_via_engine(tmp_path))
+
+    async def _test_duplicate_via_engine(self, tmp_path):
+        from src.core.engine import TradingEngine
+        from src.core.portfolio import Portfolio
+        from src.core.types import ExecutionReport
+        portfolio = Portfolio(starting_cash="10000")
+        engine = TradingEngine(
+            redis_url="redis://localhost:6379/15",
+            journal_path=str(tmp_path / "dup.jsonl"),
+            portfolio=portfolio,
+        )
+        report = ExecutionReport(
+            client_order_id="c1", exchange_order_id="ex:1:filled",
+            symbol="BTCUSDT", side=OrderSide.BUY, status="FILLED",
+            filled_quantity=to_decimal("1"), last_filled_price=to_decimal("100"),
+            remaining_quantity=to_decimal("0"), timestamp=1, fee=to_decimal("0"))
+        await engine.apply_execution_report(report)
+        assert portfolio.positions["BTCUSDT"].quantity == to_decimal("1")
+        assert portfolio.cash == to_decimal("9900")  # 10000 - 100*1
+        before_journal = pathlib.Path(engine.journal.filepath).read_text().count("ex:1:filled")
+        # Duplicate via public API — must be dropped before mutation
+        await engine.apply_execution_report(report)
+        # No double count
+        assert portfolio.positions["BTCUSDT"].quantity == to_decimal("1")
+        assert portfolio.cash == to_decimal("9900")
+        after_journal = pathlib.Path(engine.journal.filepath).read_text().count("ex:1:filled")
+        assert after_journal == before_journal, "duplicate must not be journaled again"
+        await engine.stop()
+        # Also verify PaperBroker public path still dedups via on_market_price not double filling
         b = PaperBroker(CostModel())
         b.submit_order(_intent(qty="1", price="100"))
         b.on_market_price("BTCUSDT", to_decimal("90"), 1)
         reports = b.drain_reports()
-        # Find the FILLED report
         filled = [r for r in reports if r.status == "FILLED"][0]
-        # Try to re-inject same report via direct _emit with same ids (simulate REST duplicate)
-        # Use the broker's dedup directly
-        before = b.get_positions()
-        # Manually try to mark same report id as seen and re-emit
-        b._seen_report_ids.add(filled.exchange_order_id)
-        # Second drain should be empty (no new reports)
+        # second price tick on already-filled limit order must not emit duplicate
+        b.on_market_price("BTCUSDT", to_decimal("80"), 2)
         assert b.drain_reports() == []
 
 
