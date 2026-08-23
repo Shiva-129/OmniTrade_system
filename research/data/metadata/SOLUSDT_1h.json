@@ -1,0 +1,24 @@
+{
+  "content_hash": "ada0c4835ae5b879249ca1b4df8eeb5c2e50d5653521ef8186e7940ccf147df2",
+  "csv_path": "research\\data\\raw\\SOLUSDT_1h.csv",
+  "end": "2024-12-31T23:00:00+00:00",
+  "format": "csv",
+  "raw_path": "research\\data\\raw\\SOLUSDT_1h.json",
+  "retrieved_at": "2026-08-23T11:16:07.677230+00:00",
+  "row_count": 38470,
+  "schema": [
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume"
+  ],
+  "sha256": "500a50523af1486070d9c906eab7f9fbad90020ef1d694514ce04344101f6d2d",
+  "source": "Binance Official API",
+  "source_url": "https://api.binance.com/api/v3/klines",
+  "start": "2020-08-11T06:00:00+00:00",
+  "symbol": "SOLUSDT",
+  "timeframe": "1h",
+  "timezone": "UTC"
+}

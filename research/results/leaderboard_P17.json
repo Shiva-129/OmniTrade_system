@@ -1,0 +1,77 @@
+[
+  {
+    "strategy": "ema_crossover",
+    "symbol": "BTC/USDT",
+    "timeframe": "1h",
+    "dataset_hash": "f630861c",
+    "baseline_return": -0.3269,
+    "baseline_sharpe": 1.104,
+    "baseline_dd": 1.221,
+    "baseline_trades": 762,
+    "best_params": {
+      "fast_period": "8",
+      "slow_period": "26",
+      "cooldown_events": "0"
+    },
+    "test_return": -0.2059,
+    "test_sharpe": -95.78,
+    "test_dd": 0.21,
+    "cost_pass": false,
+    "walkforward_mean": -0.0082,
+    "walkforward_pos_rate": 0.351,
+    "robust_pass": false,
+    "decision": "REJECT",
+    "experiment_id": "6e8d9ab9eb87bbfb",
+    "config_hash": "17e53293"
+  },
+  {
+    "strategy": "zscore_mean_reversion",
+    "symbol": "BTC/USDT",
+    "timeframe": "1h",
+    "dataset_hash": "f630861c",
+    "baseline_return": -2.779,
+    "baseline_sharpe": -4.187,
+    "baseline_dd": 2.629,
+    "baseline_trades": 832,
+    "best_params": {
+      "window": "10",
+      "entry_z": "2.0",
+      "exit_z": "0.5"
+    },
+    "test_return": -0.0185,
+    "test_sharpe": -6.317,
+    "test_dd": 0.108,
+    "cost_pass": false,
+    "walkforward_mean": -0.0115,
+    "walkforward_pos_rate": 0.443,
+    "robust_pass": false,
+    "decision": "REJECT",
+    "experiment_id": "cafa1bf1915bfac9",
+    "config_hash": "3c5ab148"
+  },
+  {
+    "strategy": "donchian_breakout",
+    "symbol": "BTC/USDT",
+    "timeframe": "1h",
+    "dataset_hash": "f630861c",
+    "baseline_return": -10.257,
+    "baseline_sharpe": 1.982,
+    "baseline_dd": 6.783,
+    "baseline_trades": 1748,
+    "best_params": {
+      "lookback": "40",
+      "atr_period": "14",
+      "atr_stop_multiplier": "3.0"
+    },
+    "test_return": -0.0985,
+    "test_sharpe": -53.258,
+    "test_dd": 0.175,
+    "cost_pass": false,
+    "walkforward_mean": -0.0161,
+    "walkforward_pos_rate": 0.325,
+    "robust_pass": false,
+    "decision": "REJECT",
+    "experiment_id": "ad68b9d657149934",
+    "config_hash": "ef0cb7b4"
+  }
+]

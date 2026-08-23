@@ -1,0 +1,24 @@
+{
+  "content_hash": "f630861c26e39ec17c6a325e1a8010028a7d2069aa495e7be9e107f41013f32a",
+  "csv_path": "research\\data\\raw\\BTCUSDT_1h.csv",
+  "end": "2024-12-31T23:00:00+00:00",
+  "format": "csv",
+  "raw_path": "research\\data\\raw\\BTCUSDT_1h.json",
+  "retrieved_at": "2026-08-23T11:14:52.736371+00:00",
+  "row_count": 43816,
+  "schema": [
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume"
+  ],
+  "sha256": "04a40c3a1ff8f3669295ff91a6d9b7d0208d332f94e9c35fecf56f8224b6914f",
+  "source": "Binance Official API",
+  "source_url": "https://api.binance.com/api/v3/klines",
+  "start": "2020-01-01T00:00:00+00:00",
+  "symbol": "BTCUSDT",
+  "timeframe": "1h",
+  "timezone": "UTC"
+}
