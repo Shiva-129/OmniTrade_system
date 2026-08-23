@@ -21,30 +21,34 @@ from src.strategies.donchian_breakout import DonchianBreakoutStrategy
 from src.strategies.donchian_breakout import DonchianConfig
 from src.strategies.ema_crossover import EmaCrossoverConfig
 from src.strategies.ema_crossover import EmaCrossoverStrategy
+from src.strategies.ema_rsi_filtered import EmaRsiConfig, EmaRsiFilteredStrategy
 from src.strategies.zscore_mean_reversion import ZScoreConfig
 from src.strategies.zscore_mean_reversion import ZScoreMeanReversionStrategy
 
 REQUIRED_AXES: Dict[str, Tuple[str, ...]] = {
     "ema_crossover": ("fast_period", "slow_period", "cooldown_events"),
+    "ema_rsi_filtered": ("fast_period", "slow_period", "rsi_period", "rsi_buy_threshold", "rsi_sell_threshold"),
     "zscore_mean_reversion": ("window", "entry_z", "exit_z"),
     "donchian_breakout": ("lookback", "atr_period", "atr_stop_multiplier"),
 }
 
 _CONFIG_CLS: Dict[str, type] = {
     "ema_crossover": EmaCrossoverConfig,
+    "ema_rsi_filtered": EmaRsiConfig,
     "zscore_mean_reversion": ZScoreConfig,
     "donchian_breakout": DonchianConfig,
 }
 
 _STRATEGY_CLS: Dict[str, type] = {
     "ema_crossover": EmaCrossoverStrategy,
+    "ema_rsi_filtered": EmaRsiFilteredStrategy,
     "zscore_mean_reversion": ZScoreMeanReversionStrategy,
     "donchian_breakout": DonchianBreakoutStrategy,
 }
 
-_INT_AXES = {"fast_period", "slow_period", "cooldown_events",
+_INT_AXES = {"fast_period", "slow_period", "cooldown_events", "rsi_period",
              "window", "lookback", "atr_period"}
-_FLOAT_AXES = {"entry_z", "exit_z", "atr_stop_multiplier"}
+_FLOAT_AXES = {"entry_z", "exit_z", "atr_stop_multiplier", "rsi_buy_threshold", "rsi_sell_threshold"}
 
 
 class BaseSpec(BaseModel):

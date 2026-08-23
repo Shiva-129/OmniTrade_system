@@ -49,14 +49,14 @@ class ExperimentRegistry:
 
     def exists(self, experiment_id: str) -> bool:
         for rec in self._iter_file():
-            if rec.get("config_hash") == experiment_id:
+            if rec.get("config_hash") == experiment_id or rec.get("experiment_id") == experiment_id:
                 return True
         return False
 
     def record(self, payload: Dict[str, Any]) -> str:
-        experiment_id = payload.get("config_hash")
+        experiment_id = payload.get("experiment_id") or payload.get("config_hash")
         if not experiment_id:
-            raise ValueError("payload must contain config_hash as experiment_id")
+            raise ValueError("payload must contain config_hash or experiment_id as experiment_id")
         if self.exists(experiment_id):
             raise DuplicateExperimentError(
                 f"experiment_id {experiment_id} already recorded; "
@@ -70,7 +70,7 @@ class ExperimentRegistry:
 
     def get(self, experiment_id: str) -> Optional[Dict[str, Any]]:
         for rec in self._iter_file():
-            if rec.get("config_hash") == experiment_id:
+            if rec.get("config_hash") == experiment_id or rec.get("experiment_id") == experiment_id:
                 return rec
         return None
 
