@@ -12,11 +12,13 @@ class Gatekeeper:
     The Single Authority.
     Integrates Authority, Guard, and Reconciliation.
     """
-    def __init__(self, redis_url: str = "redis://localhost:6379/0"):
+    def __init__(self, redis_url: str = "redis://localhost:6379/0", safety=None):
         self.state_controller = StateController(redis_url)
         self.command_registry = CommandRegistry(redis_url)
-        self.guard = ExecutionGuard(redis_url)
+        self.guard = ExecutionGuard(redis_url, safety=safety)
         self.reconciliation = ReconciliationEngine(self.state_controller, self.guard)
+        # Expose safety for engine wiring (None in legacy construction)
+        self.safety = safety
 
     def submit_intent(self, intent: OrderIntent) -> str:
         """

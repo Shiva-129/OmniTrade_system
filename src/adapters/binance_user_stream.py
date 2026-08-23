@@ -44,6 +44,7 @@ class BinanceUserStream:
         on_execution_report: Optional[Callable] = None,
         ws_factory=None,
         rest_factory=None,
+        keepalive_interval_s: float = 30 * 60,
     ):
         # Fail-closed: only testnet config is accepted (reuse Phase 11 validation).
         if getattr(config, "binance_env", None) != "testnet":
@@ -58,10 +59,13 @@ class BinanceUserStream:
         self._ws = None
         self._listen_key: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
+        self._keepalive_task: Optional[asyncio.Task] = None
         self._running = False
         self._last_msg_ts: float = 0.0
+        self._last_keepalive_ts: float = 0.0
         self._seen_exec_ids: Set[str] = set()
         self._state: str = "DISCONNECTED"  # DISCONNECTED -> CONNECTED -> STALE -> RECONNECTING
+        self.keepalive_interval_s = keepalive_interval_s
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -73,8 +77,10 @@ class BinanceUserStream:
         self._listen_key = await self._create_listen_key()
         self._ws = await self._connect_ws(self._listen_key)
         self._last_msg_ts = time.time()
+        self._last_keepalive_ts = time.time()
         self._state = "CONNECTED"
         self._task = asyncio.create_task(self._recv_loop(), name="binance-user-stream")
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop(), name="binance-keepalive")
         logger.info("user_stream_connected", listen_key=self._listen_key[:8] + "...")
 
     async def disconnect(self) -> None:
@@ -86,6 +92,13 @@ class BinanceUserStream:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        if self._keepalive_task:
+            self._keepalive_task.cancel()
+            try:
+                await self._keepalive_task
+            except asyncio.CancelledError:
+                pass
+            self._keepalive_task = None
         if self._ws and hasattr(self._ws, "close"):
             try:
                 await self._ws.close()
@@ -155,6 +168,53 @@ class BinanceUserStream:
         if "testnet.binance.vision" in base:
             return "wss://testnet.binance.vision"
         return "wss://testnet.binance.vision"
+
+    async def _keepalive_loop(self) -> None:
+        """Periodically PUT listenKey to prevent 60-min expiry.
+        Failures mark STALE and will be handled via reconnect+reconcile."""
+        try:
+            while self._running:
+                await asyncio.sleep(self.keepalive_interval_s)
+                if not self._running or self._listen_key is None:
+                    break
+                try:
+                    await self._keepalive_listen_key()
+                    self._last_keepalive_ts = time.time()
+                    logger.info("user_stream_keepalive", listen_key=self._listen_key[:8] + "...")
+                except Exception as e:
+                    logger.error("user_stream_keepalive_failed", error=str(e))
+                    self._state = "STALE"
+                    # Trigger reconnect via the same path as WS failure
+                    # (caller will do REST reconcile)
+                    break
+        except asyncio.CancelledError:
+            pass
+
+    async def _keepalive_listen_key(self) -> None:
+        if self._rest_factory is not None:
+            rest = self._rest_factory(self.config)
+            if hasattr(rest, "keepalive_listen_key"):
+                r = rest.keepalive_listen_key(self._listen_key)
+                if asyncio.iscoroutine(r):
+                    await r
+                return
+            if hasattr(rest, "put_user_data_stream"):
+                r = rest.put_user_data_stream(self._listen_key)
+                if asyncio.iscoroutine(r):
+                    await r
+                return
+        # Real path: ccxt PUT
+        try:
+            import ccxt  # type: ignore
+            ex = ccxt.binance({
+                "apiKey": self.config.api_key,
+                "secret": self.config.api_secret,
+                "enableRateLimit": True,
+            })
+            ex.set_sandbox_mode(True)
+            ex.private_put_user_data_stream({"listenKey": self._listen_key})  # type: ignore
+        except Exception as e:
+            raise RuntimeError("keepalive failed") from e
 
     async def _recv_loop(self) -> None:
         assert self._ws is not None

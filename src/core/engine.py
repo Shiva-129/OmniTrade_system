@@ -20,11 +20,16 @@ from typing import List, Dict
 from .clock import Clock
 from .events import EventBus, EventType, drain
 from .money import to_decimal
+from .execution_mode import ExecutionMode, parse_execution_mode
+from ..observability.alerts import AlertManager
+from ..observability.health import HealthMonitor
+from ..observability.metrics import MetricsRegistry
 from .portfolio import Portfolio
+from .safety import SafetyController, SafetyState
 from .state import ObserverState
 from .journal import RawJournal
 from .logger import configure_logging, get_logger
-from .types import ExecutionReport, JournalEntry, MarketEvent, PortfolioUpdate, RiskDecision
+from .types import ExecutionReport, JournalEntry, MarketEvent, PortfolioUpdate, RiskDecision, RiskCheck
 from ..gatekeeper.engine import Gatekeeper
 from ..gatekeeper.state_controller import StateController
 from ..markets.exchange_interface import ExchangeInterface
@@ -45,6 +50,12 @@ class TradingEngine:
         risk_manager: RiskManager | None = None,
         gatekeeper: Gatekeeper | None = None,
         broker=None,
+        safety: SafetyController | None = None,
+        execution_mode: str | ExecutionMode = ExecutionMode.TESTNET,
+        metrics: MetricsRegistry | None = None,
+        health: HealthMonitor | None = None,
+        alerts: AlertManager | None = None,
+        user_stream=None,
     ):
         self.bus = EventBus()
         self.state = ObserverState(redis_url=redis_url)
@@ -53,10 +64,40 @@ class TradingEngine:
         self.state_controller = StateController(redis_url)
         # Phase 5: optional financial truth. None => observation-only mode.
         self.portfolio = portfolio
+        # Phase 12: SafetyController is the single authority.
+        # ObserverState remains the telemetry source; Safety owns transitions.
+        self.safety: SafetyController = safety or SafetyController()
+        # D2: ExecutionMode fail-closed (PAPER/TESTNET/DISABLED only)
+        if isinstance(execution_mode, str):
+            self.execution_mode = parse_execution_mode(execution_mode)
+        else:
+            # Validate enum value is not production
+            if execution_mode not in (ExecutionMode.PAPER, ExecutionMode.TESTNET, ExecutionMode.DISABLED):
+                raise ValueError(f"ExecutionMode {execution_mode!r} not allowed")
+            self.execution_mode = execution_mode
+        if self.execution_mode == ExecutionMode.DISABLED:
+            self.safety.halt("DISABLED execution mode")
+        # D4: Observability (vendor-agnostic, swappable)
+        self.metrics: MetricsRegistry = metrics or MetricsRegistry()
+        self.health: HealthMonitor = health or HealthMonitor(self.safety)
+        self.alerts: AlertManager = alerts or AlertManager()
+        for _n, _c in AlertManager.standard_conditions().items():
+            try:
+                self.alerts.register(_n, _c)
+            except Exception:
+                pass
+        # D5: User-data stream (optional, testnet only)
+        self.user_stream = user_stream
+        # Wire gatekeeper's guard to same safety (single state machine).
+        if gatekeeper is not None:
+            # Ensure gatekeeper's guard delegates to this safety
+            gatekeeper.safety = self.safety  # type: ignore[attr-defined]
+            if hasattr(gatekeeper, "guard") and gatekeeper.guard is not None:
+                gatekeeper.guard.safety = self.safety  # type: ignore[attr-defined]
+        self.gatekeeper = gatekeeper
         # Phase 7 pipeline: MarketEvent -> Strategy -> Risk -> Gatekeeper.
         self.strategy = strategy
         self.risk_manager = risk_manager
-        self.gatekeeper = gatekeeper
         # Phase 10: optional execution venue (PaperBroker today).
         self.broker = broker
         # Duplicate-execution guard: every applied report's exchange id.
@@ -114,11 +155,120 @@ class TradingEngine:
                 await self.bus.publish(PortfolioUpdate, PortfolioUpdate(
                     symbol=report.symbol, quantity_delta=delta,
                 ))
+        # D4: metrics for executions
+        try:
+            if report.status == "FILLED":
+                self.metrics.inc("fills")
+                self.metrics.inc("execution_trades_total")
+            elif report.status in ("PARTIAL_FILL", "PARTIALLY_FILLED"):
+                self.metrics.inc("partial_fills")
+        except Exception:
+            pass
+        # Update health with portfolio state
+        try:
+            if self.portfolio is not None:
+                self.health.set("equity", float(self.portfolio.last_equity))
+                self.health.set("fees_paid", float(self.portfolio.fees_paid))
+        except Exception:
+            pass
 
     def seed_execution_ids(self, ids) -> None:
         """Restart recovery: pre-load applied report ids from a previous
         session so replayed reports cannot double-count."""
         self._seen_exec_ids.update(ids)
+
+    def _is_intent_reducing(self, intent) -> bool:
+        """Determines if an intent would reduce absolute exposure.
+        Uses Portfolio._evolve_position for exact arithmetic when possible.
+        Fail-closed: if portfolio or price is missing, returns False."""
+        if self.portfolio is None:
+            return False
+        pos = self.portfolio.positions.get(intent.symbol)
+        if pos is None:
+            return False
+        from .money import ZERO
+
+        if pos.quantity == ZERO:
+            return False
+        # Determine signed delta and reference price
+        from .types import OrderSide
+
+        signed = intent.quantity if intent.side == OrderSide.BUY else -intent.quantity
+        # Reference price for prospective calculation
+        ref_price = intent.price
+        if ref_price is None:
+            # MARKET order: use current mark if available
+            mark = self.portfolio.marks.get(intent.symbol)
+            if mark is None:
+                return False
+            # mark is _Mark with price field
+            try:
+                ref_price = mark.price
+            except Exception:
+                return False
+        try:
+            evolved = self.portfolio._evolve_position(pos, signed, ref_price)
+            # Reducing iff absolute quantity shrinks and not flipping through zero
+            return abs(evolved.quantity) < abs(pos.quantity)
+        except Exception:
+            return False
+
+    async def perform_startup_reconciliation(self) -> bool:
+        """D6: 9-step startup ordering. Returns True if consistent (HEALTHY)."""
+        try:
+            # 2. Connect / load markets (if broker is Binance)
+            if self.broker is not None and hasattr(self.broker, "_exchange"):
+                try:
+                    if hasattr(self.broker._exchange, "load_markets"):
+                        self.broker._exchange.load_markets()
+                except Exception as e:
+                    logger.error("startup_load_markets_failed", error=str(e))
+                    self.safety.halt(f"startup load_markets failed: {e}")
+                    return False
+            # 3. Load local journal/state (ensure file exists)
+            try:
+                # Journal is already opened in __init__; just verify it
+                if self.journal.is_closed:
+                    raise RuntimeError("journal is closed at startup")
+            except Exception as e:
+                self.safety.halt(f"journal load failed: {e}")
+                return False
+            # 4-8. REST reconciliation if broker supports it
+            if self.broker is not None and hasattr(self.broker, "startup_reconcile"):
+                try:
+                    result = self.broker.startup_reconcile()
+                    self.health.set("reconciliation_state", "MISMATCH" if not result.get("ok", True) else "CONSISTENT")
+                    self.health.set("reconciliation_mismatches", len(result.get("mismatches", [])))
+                    if not result.get("ok", True):
+                        self.safety.halt(f"startup reconciliation mismatch: {result.get('mismatches')}")
+                        try:
+                            self.metrics.inc("reconciliation_mismatch")
+                        except Exception:
+                            pass
+                        return False
+                    try:
+                        self.metrics.inc("reconciliation_success")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.error("startup_reconcile_failed", error=str(e))
+                    self.safety.halt(f"startup reconcile failed: {e}")
+                    return False
+            # 9. Establish WS (if present)
+            if self.user_stream is not None:
+                try:
+                    await self.user_stream.connect()
+                    self.health.set("ws_state", self.user_stream.connection_state())
+                except Exception as e:
+                    logger.error("user_stream_connect_failed", error=str(e))
+                    self.safety.degrade(f"WS connect failed: {e}")
+                    # WS failure is DEGRADED, not HALT, per spec
+            # Only now HEALTHY
+            return not self.safety.is_halted()
+        except Exception as e:
+            logger.error("startup_reconciliation_error", error=str(e))
+            self.safety.halt(f"startup error: {e}")
+            return False
 
     # ------------------------------ lifecycle ------------------------------
 
@@ -129,7 +279,11 @@ class TradingEngine:
                 "Strategy stage requires a RiskManager: "
                 "strategies must never bypass risk evaluation."
             )
-        logger.info("engine_startup", version="phase-7-engine")
+        # D6: Startup ordering (fail-closed)
+        if not await self.perform_startup_reconciliation():
+            logger.error("startup_reconciliation_failed_halt", safety_state=self.safety.state.value)
+            # Still proceed to start but safety is HALT, so no orders will be submitted
+        logger.info("engine_startup", version="phase-13-engine")
         self.running = True
 
         market_q = self.register_stage(MarketEvent)
@@ -171,19 +325,63 @@ class TradingEngine:
 
     async def stop(self):
         """
-        Ordered shutdown: stop ingesting first so no new events enter after
-        consumers are cancelled => zero silent drops.
+        Ordered shutdown (D6): stop submissions -> cancel/settle -> flush
+        journal -> close WS -> close broker -> close Redis.
         """
         if not self.running:
             return
+        # 1. Stop submissions
+        try:
+            self.safety.halt("shutdown: stop submissions")
+        except Exception:
+            pass
         self.running = False
+        # 2. Cancel open orders per policy (best-effort)
+        if self.broker is not None and hasattr(self.broker, "get_open_orders"):
+            try:
+                for order in list(self.broker.get_open_orders()):
+                    coid = order.get("client_order_id") or order.get("clientOrderId", "")
+                    if coid:
+                        try:
+                            self.broker.cancel_order(coid)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        # 3. Stop ingesting first so no new events enter after consumers are cancelled
         for ex in self.exchanges:
-            await ex.close()
+            try:
+                await ex.close()
+            except Exception:
+                pass
         self.bus.close()          # wakes consumers with sentinel
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
-        self.journal.close()
+        # 4. Flush journal
+        try:
+            if not self.journal.is_closed:
+                self.journal.close()
+        except Exception:
+            pass
+        # 5. Close WS
+        if self.user_stream is not None:
+            try:
+                await self.user_stream.disconnect()
+            except Exception:
+                pass
+        # 6. Close broker
+        if self.broker is not None and hasattr(self.broker, "close"):
+            try:
+                self.broker.close()
+            except Exception:
+                pass
+        # 7. Close Redis (via state)
+        try:
+            if hasattr(self.state, "redis") and hasattr(self.state.redis, "close"):
+                self.state.redis.close()
+        except Exception:
+            pass
 
     async def shutdown(self):
         if not self.running:
@@ -211,12 +409,43 @@ class TradingEngine:
             self.journal.append(entry)
             await self.bus.publish(MarketEvent, MarketEvent(packet=packet))
 
+    def health_snapshot(self) -> dict:
+        """Machine-readable health (Phase 12)."""
+        snap = self.health.snapshot()
+        # Enrich with live telemetry
+        try:
+            snap["heartbeat_age_s"] = (__import__("time").time() - self.state.redis.get("observer:last_update") / 1_000_000) if self.state.redis.get("observer:last_update") else 999
+        except Exception:
+            snap["heartbeat_age_s"] = 999
+        try:
+            snap["gap_count"] = self.state.get_gap_count()
+        except Exception:
+            pass
+        if self.portfolio is not None:
+            try:
+                snap["equity"] = float(self.portfolio.last_equity)
+                snap["drawdown_pct"] = float(self.portfolio.drawdown().drawdown_pct)
+            except Exception:
+                pass
+        # Evaluate alerts (vendor-agnostic, no side effects in core)
+        try:
+            self.alerts.evaluate(snap)
+        except Exception:
+            pass
+        return snap
+
     async def _handle_market_event(self, event: MarketEvent):
         """
         Integrity stage (FIFO, single consumer => deterministic order).
         Same logic as legacy observer._process_loop, event-shaped.
         """
         packet = event.packet
+        # D4: health heartbeat
+        try:
+            self.health.set("last_market_ts", packet.exchange_ts)
+            self.health.set("last_source", packet.source)
+        except Exception:
+            pass
 
         # 1. Sequence & gap detection
         key = f"{packet.source}:{packet.topic}"
@@ -236,6 +465,12 @@ class TradingEngine:
                             data={"source": key, "expected": expected, "got": seq_id},
                         ))
                         self.state.record_gap()
+                        try:
+                            self.metrics.inc("gaps")
+                            self.health.set("gap_count", self.state.get_gap_count())
+                            self.health.set("last_gap_source", key)
+                        except Exception:
+                            pass
                         if self.state.get_system_status() == "CONNECTED":
                             self._transition_status("DEGRADED", msg, {"gap": gap_size})
                     elif seq_id < last_seq:
@@ -275,42 +510,107 @@ class TradingEngine:
 
         # 3. Drift stats + per-packet heartbeat (Phase 4 fix lives here now)
         stats = self.state.update_drift(packet.drift_us)
+        try:
+            self.health.set("clock_drift_us", stats.mean_us)
+            self.health.set("heartbeat_age_s", 0)
+            self.metrics.gauge("clock_drift_us", float(stats.mean_us))
+        except Exception:
+            pass
 
         # 4. Constraint enforcement
         if abs(stats.mean_us) > 500_000:
             logger.error("SYSTEM_HALT_DRIFT_VIOLATION", mean_drift_us=stats.mean_us)
+            try:
+                self.metrics.inc("halt_total", tags={"reason": "drift"})
+            except Exception:
+                pass
             self._transition_status("HALT", "Drift Violation", {"mean_drift_us": stats.mean_us})
 
-        # 5. Strategy stage (Phase 7): signal -> risk -> gatekeeper.
-        #    The engine NEVER invents intents; strategies never mutate
-        #    money. Decisions are journaled for audit.
+        # 5. Strategy stage (Phase 7 + 13): signal -> SAFETY -> risk -> gatekeeper.
+        #    SafetyController is the single authority: no order may reach
+        #    Risk/Gatekeeper/Broker if safety says no. Fail-closed.
         if self.strategy is not None:
             intent = self.strategy.on_market_event(event)
             if intent is not None:
-                decision = self.risk_manager.evaluate(
-                    intent, now_us=packet.exchange_ts
-                )
-                self.journal.append(JournalEntry(
-                    event_type="PACKET",
-                    timestamp=int(packet.exchange_ts),
-                    data={"source": "risk_decision",
-                          **decision.model_dump(mode="json")},
-                ))
-                await self.bus.publish(RiskDecision, decision)
-                if decision.approved and self.gatekeeper is not None:
-                    outcome = self.gatekeeper.submit_intent(intent)
-                    logger.info("intent_submitted",
-                                cloid=intent.client_order_id,
-                                outcome=outcome)
-                    # Phase 10: Gatekeeper-approved intents may now reach
-                    # the venue. Reports drain through the same funnel.
-                    if outcome == "ACCEPTED" and self.broker is not None:
-                        broker_outcome = self.broker.submit_order(intent)
-                        logger.info("broker_submission",
+                try:
+                    self.metrics.inc("orders_submitted")
+                except Exception:
+                    pass
+                # D1: authoritative safety check (before risk)
+                is_reducing = self._is_intent_reducing(intent)
+                blocked_reason = None
+                if self.safety.is_halted():
+                    blocked_reason = f"safety HALT: {self.safety.snapshot().get('halt_reason','')}"
+                elif self.safety.is_degraded() and not is_reducing:
+                    blocked_reason = "safety DEGRADED: only reducing orders allowed"
+
+                if blocked_reason is not None:
+                    try:
+                        self.metrics.inc("safety_blocks", tags={"state": self.safety.state.value})
+                    except Exception:
+                        pass
+                    # Synthesize a safety-blocked decision (audited, no risk call)
+                    decision = RiskDecision(
+                        client_order_id=intent.client_order_id,
+                        symbol=intent.symbol,
+                        approved=False,
+                        rule="SAFETY",
+                        reason=blocked_reason,
+                        checks=(RiskCheck(rule="SAFETY", passed=False, detail=blocked_reason),),
+                        details={"safety_state": self.safety.state.value, "reducing": str(is_reducing)},
+                    )
+                    self.journal.append(JournalEntry(
+                        event_type="PACKET",
+                        timestamp=int(packet.exchange_ts),
+                        data={"source": "risk_decision", **decision.model_dump(mode="json")},
+                    ))
+                    await self.bus.publish(RiskDecision, decision)
+                    logger.warning("safety_blocked_submit",
+                                   cloid=intent.client_order_id, reason=blocked_reason)
+                else:
+                    decision = self.risk_manager.evaluate(
+                        intent, now_us=packet.exchange_ts
+                    )
+                    try:
+                        if decision.approved:
+                            self.metrics.inc("risk_approvals")
+                        else:
+                            self.metrics.inc("risk_rejections", tags={"rule": decision.rule})
+                    except Exception:
+                        pass
+                    self.journal.append(JournalEntry(
+                        event_type="PACKET",
+                        timestamp=int(packet.exchange_ts),
+                        data={"source": "risk_decision",
+                              **decision.model_dump(mode="json")},
+                    ))
+                    await self.bus.publish(RiskDecision, decision)
+                    if decision.approved and self.gatekeeper is not None:
+                        outcome = self.gatekeeper.submit_intent(intent)
+                        logger.info("intent_submitted",
                                     cloid=intent.client_order_id,
-                                    outcome=broker_outcome)
-                        for rep in self.broker.drain_reports():
-                            await self.apply_execution_report(rep)
+                                    outcome=outcome)
+                        try:
+                            if outcome == "DUPLICATE":
+                                self.metrics.inc("duplicate_suppressed")
+                            elif outcome == "ACCEPTED":
+                                self.metrics.inc("gatekeeper_accepted")
+                            self.health.set("last_gatekeeper_outcome", outcome)
+                        except Exception:
+                            pass
+                        # Phase 10: Gatekeeper-approved intents may now reach
+                        # the venue. Reports drain through the same funnel.
+                        if outcome == "ACCEPTED" and self.broker is not None:
+                            try:
+                                self.metrics.inc("broker_submissions")
+                            except Exception:
+                                pass
+                            broker_outcome = self.broker.submit_order(intent)
+                            logger.info("broker_submission",
+                                        cloid=intent.client_order_id,
+                                        outcome=broker_outcome)
+                            for rep in self.broker.drain_reports():
+                                await self.apply_execution_report(rep)
 
         # 6. Structured log
         logger.info(
@@ -324,14 +624,43 @@ class TradingEngine:
     # ------------------------------- status ---------------------------------
 
     def _transition_status(self, new_status: str, reason: str, payload: dict):
-        """Atomic status update: Redis + Journal (audit requirement)."""
+        """Atomic status update: Redis + Journal (audit requirement).
+        SafetyController is the single authority: ObserverState is the
+        telemetry source, Safety owns the state machine. Mapping:
+          CONNECTED -> HEALTHY, DEGRADED -> DEGRADED, HALT -> HALT.
+        Preserve backward-compatible Redis observer:status behavior.
+        """
         self.state.set_system_status(new_status)
+        # Sync SafetyController (single authority, no second state machine)
+        if new_status == "HALT":
+            self.safety.halt(reason)
+            try:
+                self.metrics.inc("halt_total")
+                self.health.set("last_halt_reason", reason)
+            except Exception:
+                pass
+        elif new_status == "DEGRADED":
+            self.safety.degrade(reason)
+            try:
+                self.metrics.inc("degraded_total")
+                self.health.set("last_degraded_reason", reason)
+            except Exception:
+                pass
+        elif new_status == "CONNECTED":
+            # Fail-closed: do not auto-recover HALT/DEGRADED via observer.
+            # HEALTHY stays HEALTHY; DEGRADED/HALT require explicit recovery.
+            pass
         self.journal.append(JournalEntry(
             event_type="STATUS_CHANGE",
             timestamp=Clock.now_epoch_us(),
             data={"status": new_status, "reason": reason, "payload": payload},
         ))
         logger.info("status_change", status=new_status, reason=reason)
+        # D4: evaluate alerts after every status change
+        try:
+            self.alerts.evaluate(self.health_snapshot())
+        except Exception:
+            pass
 
 
 def init_money_context_once():
