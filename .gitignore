@@ -4,16 +4,42 @@ credentials.json
 secrets.json
 __pycache__/
 *.pyc
+.pytest_cache/
+.coverage
+htmlcov/
 
 # Runtime journals & hash logs (event-sourced state, not source)
 journal.jsonl
 *.hashes.json
 
+# Historical market data (large, reproducible via ingestion)
 data/raw/*
 data/processed/*
+research/data/raw/*
+research/data/normalized/*
+research/data/processed/*
+
+# Research outputs (reproducible via V2 engine)
+research/experiments/registry.jsonl
+research/results/*
+!research/results/.gitkeep
+
+# Local databases / caches
+dump.rdb
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Dependencies
 node_modules/
 dist/
-.coverage
-
-# Redis persistence snapshots
-dump.rdb
