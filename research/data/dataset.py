@@ -26,7 +26,7 @@ from src.core.money import Decimal, dec_to_str, to_decimal
 
 
 _TIMEFRAME_MINUTES = {
-    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+    "tick": 1, "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
     "1h": 60, "2h": 120, "4h": 240, "6h": 360, "12h": 720, "1d": 1440,
 }
 

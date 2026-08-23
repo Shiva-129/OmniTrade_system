@@ -280,6 +280,35 @@ class Portfolio:
         )
 
     # ------------------------------------------------------------------
+    # Multi-symbol read-only views (Phase 14 P3) -- no mutation
+    # ------------------------------------------------------------------
+
+    def exposure_by_symbol(self, now_us: Optional[int] = None) -> Dict[str, Optional[Decimal]]:
+        """Absolute market value per symbol if priced, else None. Read-only."""
+        out: Dict[str, Optional[Decimal]] = {}
+        for sym, pos in self.positions.items():
+            if pos.quantity == ZERO:
+                out[sym] = ZERO
+                continue
+            if not self._is_mark_fresh(sym, now_us):
+                out[sym] = None
+            else:
+                out[sym] = abs(pos.quantity * self.marks[sym].price)
+        return out
+
+    def total_gross_exposure(self, now_us: Optional[int] = None) -> Decimal:
+        """Sum of absolute exposures for priced positions. Read-only."""
+        total = ZERO
+        for v in self.exposure_by_symbol(now_us).values():
+            if v is not None:
+                total += v
+        return total
+
+    def aggregate_fees(self) -> Decimal:
+        """Read-only alias for fees_paid (portfolio-level research helper)."""
+        return self.fees_paid
+
+    # ------------------------------------------------------------------
     # Deterministic persistence
     # ------------------------------------------------------------------
 

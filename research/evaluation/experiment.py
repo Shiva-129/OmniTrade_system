@@ -28,6 +28,13 @@ from .metrics import Metrics, compute_metrics
 from .split import train_val_test
 
 
+INDICATOR_VERSIONS = {
+    "ema": "1.0", "sma": "1.0", "rsi": "1.0", "macd": "1.0",
+    "atr": "1.0", "bollinger": "1.0", "adx": "1.0",
+    "volume": "1.0", "volatility": "1.0",
+}
+
+
 class ExperimentConfig(BaseModel):
     model_config = {"frozen": True}
 
@@ -44,7 +51,9 @@ class ExperimentConfig(BaseModel):
     slippage_pct: str = "0"
     initial_capital: str = "10000"
     seed: int | None = None              # strategies are deterministic; kept for audit
-    software_version: str = "phase8"
+    software_version: str = "phase14"
+    strategy_config_hash: str = ""       # hash of full strategy config for reproducibility
+    indicator_versions: Dict[str, str] = {}
 
     def canonical(self) -> str:
         payload = self.model_dump(mode="json")
@@ -73,6 +82,9 @@ def build_config(*, strategy_config, dataset: OHLCVDataset,
         if k not in ("strategy_name", "strategy_version",
                      "symbol", "timeframe")
     }
+    # strategy_config_hash captures full config for reproducibility
+    cfg_payload = json.dumps(strategy_config.model_dump(mode="json"), sort_keys=True)
+    cfg_hash = hashlib.sha256(cfg_payload.encode("utf-8")).hexdigest()[:16]
     return ExperimentConfig(
         strategy_name=strategy_config.strategy_name,
         strategy_version=strategy_config.strategy_version,
@@ -84,6 +96,8 @@ def build_config(*, strategy_config, dataset: OHLCVDataset,
         end_ts=dataset.end_ts,
         taker_fee=taker_fee, maker_fee=maker_fee, slippage_pct=slippage_pct,
         initial_capital=initial_capital,
+        strategy_config_hash=cfg_hash,
+        indicator_versions=dict(INDICATOR_VERSIONS),
     )
 
 
