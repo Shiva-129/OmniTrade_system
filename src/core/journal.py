@@ -24,13 +24,21 @@ class RawJournal:
         # Ensure we write a single line
         line = json.dumps(payload) + "\n"
         self._file.write(line)
-        # Flush handled by buffering=1 for newlines, but can force if critical
-        # self._file.flush()
+        self._file.flush()
+        try:
+            os.fsync(self._file.fileno())
+        except Exception:
+            pass
 
     def close(self):
         if self.is_closed:
             return
         self.is_closed = True
+        try:
+            self._file.flush()
+            os.fsync(self._file.fileno())
+        except Exception:
+            pass
         self._file.close()
 
     @staticmethod

@@ -32,9 +32,14 @@ def test_no_hardcoded_production_url_in_adapter():
 
 def test_no_production_env_branch():
     src = pathlib.Path("src/adapters/binance.py").read_text()
-    # Verify there is no else: production fallback branch
-    # The adapter must be fail-closed: no code path selects production.
-    assert "else" not in src.lower() or "production" not in src.lower().split("else")[1][:200] or True  # structural check via config class
+    # Verify there is no else: production fallback branch via AST
+    import ast
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and node.orelse:
+            orelse_src = ast.unparse(node.orelse) if hasattr(ast, "unparse") else str(node.orelse)
+            assert "api.binance.com" not in orelse_src.lower(), f"Production URL in else branch: {orelse_src[:200]}"
+            assert "production" not in orelse_src.lower() or "testnet" in orelse_src.lower(), f"Suspicious else branch: {orelse_src[:200]}"
     # Verify BinanceTestnetConfig rejects non-testnet
     from src.adapters.binance import BinanceTestnetConfig
     import pytest

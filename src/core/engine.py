@@ -412,11 +412,18 @@ class TradingEngine:
     def health_snapshot(self) -> dict:
         """Machine-readable health (Phase 12)."""
         snap = self.health.snapshot()
-        # Enrich with live telemetry
+        # Enrich with live telemetry — fail-closed on unknown/stale heartbeat via flag (not auto-DEGRADED to keep fresh startup HEALTHY)
         try:
-            snap["heartbeat_age_s"] = (__import__("time").time() - self.state.redis.get("observer:last_update") / 1_000_000) if self.state.redis.get("observer:last_update") else 999
+            last = self.state.redis.get("observer:last_update")
+            if last:
+                snap["heartbeat_age_s"] = __import__("time").time() - int(last) / 1_000_000
+                snap["heartbeat_stale"] = snap["heartbeat_age_s"] > 30
+            else:
+                snap["heartbeat_age_s"] = 999
+                snap["heartbeat_stale"] = True
         except Exception:
             snap["heartbeat_age_s"] = 999
+            snap["heartbeat_stale"] = True
         try:
             snap["gap_count"] = self.state.get_gap_count()
         except Exception:

@@ -46,24 +46,41 @@ class TestChaosMarketFeed:
         assert outs == [None, None, None]
         assert strat._events_seen == 3
 
-    def test_out_of_order_sequence_detected(self):
+    def test_out_of_order_sequence_detected(self, tmp_path):
+        # Exercise TradingEngine sequence tracker with real MarketEvents via the engine path
+        import asyncio
         from src.core.engine import TradingEngine
-        # Gap detection is tested elsewhere; here we verify out-of-order is warned not crashed
-        # Use the engine's sequence tracker directly
-        from src.core.state import ObserverState
-        # This is a smoke test that the engine doesn't crash on out-of-order
-        assert True
+        from src.core.types import Packet, MarketEvent
+        from src.core.clock import Clock
+
+        async def _run():
+            engine = TradingEngine(redis_url="redis://localhost:6379/15", journal_path=str(tmp_path / "j.jsonl"))
+            # feed seq 10 then 5 out-of-order via _handle_market_event
+            pkt10 = Packet(exchange_ts=Clock.now_epoch_us(), local_arrival_ts=Clock.now_epoch_us(),
+                           drift_us=0, source="fake", topic="BTCUSDT",
+                           payload={"price": "100"}, sequence_id=10)
+            await engine._handle_market_event(MarketEvent(packet=pkt10))
+            assert engine.sequence_tracker["fake:BTCUSDT"] == 10
+            pkt5 = Packet(exchange_ts=Clock.now_epoch_us(), local_arrival_ts=Clock.now_epoch_us(),
+                          drift_us=0, source="fake", topic="BTCUSDT",
+                          payload={"price": "100"}, sequence_id=5)
+            # must not crash — out-of-order is warned, tracker may stay at 10 or update but no exception
+            await engine._handle_market_event(MarketEvent(packet=pkt5))
+            assert "fake:BTCUSDT" in engine.sequence_tracker
+            await engine.stop()
+        asyncio.run(_run())
 
     def test_malformed_event_handled(self):
         from src.adapters.binance_user_stream import BinanceUserStream
         from src.adapters.binance import BinanceTestnetConfig
         cfg = BinanceTestnetConfig(binance_env="testnet", api_key="k", api_secret="s")
         stream = BinanceUserStream(cfg, ws_factory=lambda lk, c: None, rest_factory=lambda c: None)
-        # Directly test _handle_raw with malformed
         import asyncio as aio
         async def run():
             await stream._handle_raw("{{{not json")
             await stream._handle_raw('{"e": "executionReport", "c": "", "S": "BUY"}')  # empty coid
+            # malformed must not crash and must not create a report/order
+            assert stream._state in ("CONNECTED", "STALE", "DISCONNECTED")  # no crash, state valid
         aio.run(run())
 
 
@@ -129,12 +146,10 @@ class TestChaosJournal:
         p = pathlib.Path(tempfile.mktemp(suffix=".jsonl"))
         p.write_text('{"event_type": "PACKET", "timestamp": 1, "data": {"source": "fake"}}\nnot json\n{"event_type": "PACKET", "timestamp": 2, "data": {"source": "fake"}}\n')
         reader = JournalReader(str(p))
-        # Should load 2 valid entries, skipping corrupt line or raising
-        try:
-            n = reader.load()
-            assert n >= 1
-        except Exception:
-            pass  # Either skipping or raising is acceptable as long as not silent
+        n = reader.load()
+        # JournalReader skips corrupt lines: exactly 2 valid entries
+        assert n == 2
+        assert len(list(reader)) == 2
 
 
 class TestChaosRedis:

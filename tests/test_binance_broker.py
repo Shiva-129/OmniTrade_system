@@ -158,8 +158,8 @@ class TestOrderTranslation:
         b = _broker()
         b.submit_order(_intent(qty="0.02", price="50000.12"))
         o = b._orders["c1"]
-        assert o["amount"] == pytest.approx(0.02)
-        assert o["price"] == pytest.approx(50000.12)
+        assert o["amount"] == "0.02"
+        assert o["price"] == "50000.12"
 
     def test_market_order_translated(self):
         b = _broker()
@@ -169,7 +169,7 @@ class TestOrderTranslation:
     def test_decimal_precision_preserved(self):
         b = _broker()
         b.submit_order(_intent(qty="0.12345", price="50000.12"))
-        assert b._orders["c1"]["amount"] == pytest.approx(0.12345)
+        assert b._orders["c1"]["amount"] == "0.12345"
 
     def test_min_qty_rejected_locally(self):
         b = _broker()
@@ -455,19 +455,22 @@ class TestOrderLifecycle:
 
 class TestCredentialSafety:
     def test_exception_does_not_contain_secret(self):
-        try:
-            BinanceTestnetConfig(binance_env="testnet", api_key="k", api_secret="my-secret-123", base_url=TESTNET_BASE_URL)
-            # Force a connectivity failure with bad factory
-            def bad_factory(cfg):
+        from src.adapters.binance import TESTNET_BASE_URL
+        # Verify RuntimeError from connectivity failure does not leak secret
+        class BadExchange:
+            def __init__(self, cfg):
+                self.cfg = cfg
+            def load_markets(self):
                 raise TimeoutError("conn fail")
-            try:
-                BinanceTestnetBroker(BinanceTestnetConfig(binance_env="testnet", api_key="k", api_secret="my-secret-123"), exchange_factory=bad_factory)
-            except RuntimeError as e:
-                msg = str(e) + str(e.__cause__)
-                assert "my-secret-123" not in msg
-                assert "my-secret" not in msg
-        except Exception:
-            pass  # config itself is fine
+            def close(self): pass
+        def bad_factory(cfg):
+            return BadExchange(cfg)
+        cfg = BinanceTestnetConfig(binance_env="testnet", api_key="k", api_secret="my-secret-123", base_url=TESTNET_BASE_URL)
+        with pytest.raises(RuntimeError, match="connectivity check failed") as exc:
+            BinanceTestnetBroker(cfg, exchange_factory=bad_factory)
+        msg = str(exc.value) + str(exc.value.__cause__)
+        assert "my-secret-123" not in msg
+        assert "my-secret" not in msg
 
     def test_journal_does_not_contain_secret(self, tmp_path):
         from src.core.journal import RawJournal
@@ -495,9 +498,9 @@ class TestDecimalPrecision:
     def test_small_quantity_preserved(self):
         b = _broker()
         b.submit_order(_intent(qty="0.001", price="50000"))
-        assert b._orders["c1"]["amount"] == pytest.approx(0.001)
+        assert b._orders["c1"]["amount"] == "0.001"
 
     def test_price_string_preserved(self):
         b = _broker()
         b.submit_order(_intent(qty="0.01", price="50000.12"))
-        assert b._orders["c1"]["price"] == pytest.approx(50000.12)
+        assert b._orders["c1"]["price"] == "50000.12"

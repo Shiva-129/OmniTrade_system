@@ -77,14 +77,32 @@ class TestSessionLifecycle:
         with pytest.raises(SessionError, match="HALT"):
             session.resume()
 
-    def test_double_start_rejected(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_double_start_rejected(self, tmp_path):
+        import unittest.mock as mock
         session, _ = _make_session(tmp_path)
-        session._running = True
-        # Verify the flag prevents re-start via direct check
-        assert session.is_running is True
-        # The actual start() method checks _running and raises
-        # (verified in test_session_start_and_stop)
-        session._running = False  # cleanup
+        # Patch engine.start to avoid blocking the event loop (real engine.start awaits forever on gath
+        # The guard under test is PortfolioSession.start()'s `if self._running: raise SessionError`
+        orig_start = session.engine.start
+        session.engine.start = mock.AsyncMock(return_value=None)
+        try:
+            # 1. first start succeeds via public API
+            await session.start()
+            assert session.is_running is True
+            # 2. second start actually executes and must raise SessionError
+            with pytest.raises(SessionError, match="already"):
+                await session.start()
+            # 3. session remains running
+            assert session.is_running is True
+            # 4. cleanup via public API
+            await session.stop()
+            assert session.is_running is False
+            # 5. after stop, start again succeeds (proves cleanup)
+            await session.start()
+            assert session.is_running is True
+        finally:
+            session.engine.start = orig_start
+            await session.stop()
 
     def test_non_engine_rejected(self):
         with pytest.raises(TypeError):
@@ -165,6 +183,16 @@ class TestSessionHealthAndAlerts:
     def test_metrics_track_transitions(self, tmp_path):
         session, _ = _make_session(tmp_path)
         before = session.engine.metrics.get_counter("halt_total")
+        # halt via engine path increments metric; use engine's safety to trigger transition
         session.engine.safety.halt("metric test")
+        # Direct SafetyController halt does not auto-inc metric — engine does on transition
+        # So verify at least safety is halted and metric is not decreased
+        assert session.engine.safety.is_halted()
         after = session.engine.metrics.get_counter("halt_total")
-        assert after >= before  # halt_total may or may not increment via safety.halt alone
+        assert after == before  # direct halt does not increment; engine transition would
+        # Now test via engine transition path
+        session2, _ = _make_session(tmp_path)
+        before2 = session2.engine.metrics.get_counter("halt_total")
+        session2.engine._transition_status("HALT", "test halt", {})
+        after2 = session2.engine.metrics.get_counter("halt_total")
+        assert after2 == before2 + 1

@@ -199,6 +199,7 @@ class BinanceTestnetBroker(BrokerInterface):
                     if hasattr(self._exchange, "_fail_next") and self._exchange._fail_next is not None:
                         raise
                     if "404" in str(e) or "ExchangeNotAvailable" in type(e).__name__:
+                        logger.warning("binance_load_markets_404_swallowed", error=str(e))
                         return
                     raise
         except Exception as e:
@@ -591,8 +592,8 @@ class BinanceTestnetBroker(BrokerInterface):
             "client_order_id": intent.client_order_id,
             "clientOrderId": intent.client_order_id,
             "exchange_order_id": ex_id,
-            "amount": float(intent.quantity),
-            "price": float(intent.price) if intent.price is not None else 0,
+            "amount": dec_to_str(intent.quantity),
+            "price": dec_to_str(intent.price) if intent.price is not None else "0",
             "symbol": intent.symbol,
             "side": intent.side.value,
             "type": intent.order_type.value,

@@ -58,8 +58,11 @@ class JournalReader:
                 line = line.strip()
                 if not line:
                     continue
-                
-                entry = JournalEntry.model_validate_json(line)
+                try:
+                    entry = JournalEntry.model_validate_json(line)
+                except Exception:
+                    # corrupt line skipped — continue replay, do not crash whole journal
+                    continue
                 
                 # Extract ordering metadata from the event data
                 data = entry.data

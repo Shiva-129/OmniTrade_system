@@ -49,7 +49,19 @@ class TestTranslation:
         e, x, se, sx = signals_to_entries_exits(marks, n_bars=10)
         assert list(e).count(True) == 1 and e[4]           # idx3 -> idx4
         assert list(x).count(True) == 1 and x[7]           # idx6 -> idx7
-        assert not any(se) or True                          # long-only path unused here
+        # BUY -> short-exit at j, SELL -> short-entry + long-exit
+        assert list(se).count(True) == 1 and se[7]
+        assert list(sx).count(True) == 1 and sx[4]
+
+    def test_long_short_arrays(self):
+        marks = [(2, "BUY"), (5, "SELL")]
+        e, x, se, sx = signals_to_entries_exits(marks, n_bars=10, long_short=True)
+        assert e[3] and sx[3]   # BUY -> long entry + short exit
+        assert x[6] and se[6]   # SELL -> long exit + short entry
+        e2, x2, se2, sx2 = signals_to_entries_exits(marks, n_bars=10, long_short=False)
+        assert not any(se2)     # short entries disabled
+        assert e2[3] and sx2[3] # BUY still gives long entry + short exit
+        assert x2[6] and not se2[6]
 
     def test_final_bar_intent_dropped_from_arrays(self):
         marks = [(9, "BUY")]                                # last bar of 10

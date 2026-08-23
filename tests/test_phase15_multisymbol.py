@@ -63,11 +63,17 @@ class TestMultiSymbol:
             cm, "10000")
         # Both symbols should have produced fills
         syms = {f["cloid"].split(":")[2] for f in result.fills}
-        assert "BTCUSDT" in syms or "ETHUSDT" in syms
-        # No cross-contamination: fills carry their own symbol's cloid prefix
+        assert syms == {"BTCUSDT", "ETHUSDT"}
+        # No cross-contamination: fills carry their own symbol's cloid prefix and correct price domain
         for f in result.fills:
             sym_in_cloid = f["cloid"].split(":")[2]
             assert sym_in_cloid in ("BTCUSDT", "ETHUSDT")
+            # BTC fills around 100-145, ETH around 200-290 — price must match symbol domain
+            price = float(f["price"])
+            if sym_in_cloid == "BTCUSDT":
+                assert 90 <= price <= 160
+            else:
+                assert 180 <= price <= 320
 
     def test_insertion_order_independent(self):
         cm = CostModel()

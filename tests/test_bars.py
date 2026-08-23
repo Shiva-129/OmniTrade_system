@@ -14,8 +14,13 @@ def test_aggregate_1m_to_5m():
     ds = make_ds([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
     agg = aggregate_bars(ds, "5m")
     assert len(agg.bars) == 2
-    assert agg.bars[0].open == agg.bars[0].high or True  # sanity
-    assert agg.bars[0].close == agg.bars[0].close
+    # first 5m bar: [1,2,3,4,5] -> open=1 high=6 (p+1) low=0.5 close=5
+    assert float(agg.bars[0].open) == 1.0
+    assert float(agg.bars[0].high) == 6.0
+    assert float(agg.bars[0].low) == 0.5
+    assert float(agg.bars[0].close) == 5.0
+    assert float(agg.bars[1].open) == 6.0
+    assert float(agg.bars[1].close) == 10.0
 
 
 def test_aggregate_drops_incomplete():

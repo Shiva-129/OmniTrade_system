@@ -200,7 +200,8 @@ class TestVerdictGates:
         # only 1 of 3 windows positive -> below 0.6 threshold
         v = decide(self._wf([0.02, -0.03, -0.01]), self._sen(1.0),
                    thresholds=VerdictThresholds(require_mc_p05_positive=False))
-        assert v.vindgate if False else v.verdict == "REJECT"
+        assert v.verdict == "REJECT"
+        assert any(g.name == "walk_forward_positive_rate" and g.passed is False for g in v.gates)
 
     def test_disclaimer_always_present(self):
         v = decide(self._wf([]), self._sen(0.5))

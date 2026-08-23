@@ -62,12 +62,32 @@ def _locked_for_window(space: ParameterSpace, base: BaseSpec,
     if len(val_ds) == 0:
         return None, "no validation tail"
 
-    # Sweep over candidates using BOTH halves of sel_ds for scoring is
-    # wrong; instead run the sweep directly against sel_ds split in half.
+    # Sweep candidates on sel_ds (train head), then score each candidate
+    # on the held-out val_ds (validation tail). This makes val_ds actually
+    # participate in selection — previously it was constructed but ignored.
     report = run_parameter_sweep(space, base, sel_ds,
                                  taker_fee=str(cost.taker_fee),
                                  slippage_pct=str(cost.slippage_pct),
                                  initial_capital=capital)
+    # Re-score every candidate on val_ds and override val_metrics for selection
+    tf_min = timeframe_minutes(base.timeframe)
+    for entry in report.entries:
+        try:
+            strategy = build_strategy(space, base, entry.params)
+            va = run_backtest(strategy, val_ds, cost, capital)
+            # recompute val metrics from the outer validation tail
+            m = compute_metrics(va.equity_curve, va.trades,
+                                initial_capital=float(capital),
+                                timeframe_minutes=tf_min,
+                                fees_paid=float(va.fees_paid),
+                                slippage_cost=float(va.slippage_cost),
+                                turnover_notional=float(va.turnover_notional))
+            # override with true validation-tail metrics (mutating frozen model via copy)
+            object.__setattr__(entry, "val_metrics", {"metrics": m.model_dump(mode="json"),
+                                                      "execution": va.summary()})
+            object.__setattr__(entry, "n_val_bars", len(val_ds))
+        except Exception:
+            continue
     try:
         locked = select_parameters(report, rule)
     except NoCandidate as e:
